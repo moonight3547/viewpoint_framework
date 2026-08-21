@@ -1,0 +1,32 @@
+{
+  "mode_strategy": "legacy_majority",
+  "forced_mode": null,
+  "grid_strategy": "uniform",
+  "azimuth_step_deg": 20.0,
+  "elevation_step_deg": 20.0,
+  "include_bbox_end": true,
+  "radius_strategy": "bbox_median",
+  "radius_min_confidence": 0.0,
+  "radius_fallback": "bbox_median",
+  "outside_placement_strategy": "prior_only",
+  "inside_placement_strategy": "prior_only",
+  "depth_margin_ratio": 1.0,
+  "center_cross_extra_ratio": 0.0,
+  "invalid_depth_behavior": "keep_prior",
+  "geometry": {
+    "strategy": "none",
+    "clearance_ratio": 0.0,
+    "clearance_abs": 0.0,
+    "knn_k": 1,
+    "path_step_ratio": 1.0,
+    "max_path_samples": 2,
+    "path_backoff_ratio": 1.0
+  },
+  "use_path_safety": false,
+  "reject_unsafe_initial_prior": false,
+  "intrinsics_strategy": "first_scaled",
+  "focal_ratio": 0.7,
+  "center_principal_point": true,
+  "view_limits_strategy": "generation_bbox",
+  "view_limits_unwrap_azimuth": false
+}
