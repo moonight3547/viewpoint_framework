@@ -1,0 +1,22 @@
+{
+  "center": {
+    "strategy": "legacy_check_alignment"
+  },
+  "mode": {
+    "strategy": "legacy_sign",
+    "global_strategy": "legacy_majority"
+  },
+  "view_space": {
+    "strategy": "legacy_minmax",
+    "legacy_extension_deg": 5.729577951308233,
+    "extension_mode": "fixed"
+  },
+  "radius": {
+    "strategy": "global_median"
+  },
+  "radius_sampling": {
+    "azimuth_step_deg": 20.0,
+    "elevation_step_deg": 20.0,
+    "include_invalid_samples": true
+  }
+}

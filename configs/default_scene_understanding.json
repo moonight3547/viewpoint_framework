@@ -1,0 +1,45 @@
+{
+  "center": {
+    "strategy": "robust_irls",
+    "robust_loss": "huber",
+    "robust_delta": 1.5,
+    "max_iters": 10,
+    "convergence_tol": 1e-7,
+    "inlier_weight_threshold": 0.2
+  },
+  "mode": {
+    "strategy": "robust",
+    "global_strategy": "weighted",
+    "max_alignment_deg": 20.0,
+    "max_residual_ratio": 0.35,
+    "min_fit_weight": 0.2,
+    "dominant_ratio": 0.75
+  },
+  "view_space": {
+    "strategy": "circular_robust",
+    "world_up": [0.0, 1.0, 0.0],
+    "azimuth_zero_reference": [0.0, 0.0, 1.0],
+    "elevation_percentiles": [2.0, 98.0],
+    "radius_percentiles": [5.0, 95.0],
+    "extension_mode": "adaptive",
+    "fixed_extension_deg": 5.0,
+    "adaptive_extension_factor": 0.5,
+    "min_extension_deg": 5.0,
+    "max_extension_deg": 15.0,
+    "radius_extension_ratio": 0.0
+  },
+  "radius": {
+    "strategy": "angular_knn",
+    "k_neighbors": 6,
+    "min_neighbors": 3,
+    "sigma_deg": 20.0,
+    "max_support_angle_deg": 30.0,
+    "low_quantile": 0.2,
+    "high_quantile": 0.8
+  },
+  "radius_sampling": {
+    "azimuth_step_deg": 20.0,
+    "elevation_step_deg": 20.0,
+    "include_invalid_samples": true
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "num_panos": 49,
+  "num_refs": 12,
+  "debug_mode": false,
+  "selected_view_fallback_count": 40,
+  "selection": {
+    "strategy": "angular_fps",
+    "reference": "generated_only",
+    "information_gain_strategy": "gaussian_visibility",
+    "coverage_include_captured": true,
+    "ig_tie_ratio": 0.97,
+    "quality_strategy": "none",
+    "near_duplicate_filter": true,
+    "near_duplicate_forward_deg": 2.0,
+    "near_duplicate_position_ratio": 0.01,
+    "ordering_strategy": "grid_order",
+    "position_distance_weight": 0.2
+  },
+  "visibility": {
+    "strategy": "gaussian_visibility",
+    "max_samples": 12000,
+    "random_seed": 0,
+    "max_image_dim": 192,
+    "alpha_threshold": 0.05,
+    "depth_tolerance_ratio": 0.03,
+    "depth_tolerance_abs_ratio": 0.003,
+    "gaussian_scale_tolerance": 2.0,
+    "opacity_power": 1.0
+  },
+  "holes": {
+    "strategy": "pointcloud_gaussian_gap",
+    "max_coverage_count": 1,
+    "voxel_size_ratio": 0.035,
+    "min_cluster_samples": 35,
+    "min_severity_fraction": 0.002,
+    "max_holes": 6,
+    "connectivity": 26,
+    "max_views_per_hole": 3,
+    "max_split_depth": 2,
+    "fit_margin": 0.82,
+    "min_focal_scale": 0.55,
+    "max_focal_scale": 1.6,
+    "min_positive_fraction": 0.9,
+    "fit_quantile": 0.98,
+    "max_source_angle_deg": 70.0,
+    "min_target_visible_fraction": 0.1,
+    "gap_distance_ratio": 0.015,
+    "gap_gaussian_scale_multiplier": 2.0,
+    "gap_min_gaussian_opacity": 0.1,
+    "gap_require_anchor_visibility": true
+  },
+  "references": {
+    "strategy": "legacy_global_fps",
+    "target_angle_sigma_deg": 25.0,
+    "target_position_sigma_ratio": 0.35,
+    "artifixer_diminishing_return": true
+  }
+}

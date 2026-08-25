@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Shared gsplat-backed Gaussian renderer for Stage 2 and Stage 3.
+
+The renderer is intentionally small and only depends on the common 3DGS PLY
+layout.  Stage 2 uses it for low-resolution reverse-depth probes.  Stage 3 reuses
+exactly the same loaded Gaussian tensors for visibility estimation and final RGB
+rendering, avoiding duplicate PLY parsing / GPU upload in the end-to-end path.
+
+Camera convention follows :mod:`viewpoint_framework.cameras_util`:
+    +X right, +Y down, +Z forward, Camera.c2w maps camera -> world.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Sequence, Tuple
+
+import numpy as np
+
+
+@dataclass
+class GaussianRendererConfig:
+    scale_activation: str = "exp"          # exp | identity
+    opacity_activation: str = "sigmoid"    # sigmoid | identity
+    max_sh_degree: Optional[int] = None     # None -> infer from PLY
+    background: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass
+class GaussianRenderResult:
+    rgb: Optional[np.ndarray]       # H,W,3 float32 in renderer output range
+    alpha: np.ndarray               # H,W float32
+    depth: Optional[np.ndarray]     # H,W expected depth, 0 for invalid
+    width: int
+    height: int
+
+
+class GsplatRenderer:
+    """Load one aligned Gaussian PLY and render arbitrary framework cameras."""
+
+    def __init__(
+        self,
+        gaussian_ply: str,
+        config: Optional[GaussianRendererConfig] = None,
+        device: str = "auto",
+    ) -> None:
+        self.config = config or GaussianRendererConfig()
+        try:
+            import torch
+            from gsplat.rendering import rasterization
+            from plyfile import PlyData
+        except ImportError as exc:
+            raise ImportError(
+                "GsplatRenderer requires torch, gsplat and plyfile. "
+                "Use the same environment that already renders your 3DGS."
+            ) from exc
+
+        self.torch = torch
+        self.rasterization = rasterization
+        self.PlyData = PlyData
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = str(device)
+        self._load_gaussians(gaussian_ply)
+
+    @staticmethod
+    def _sigmoid_numpy(x: np.ndarray) -> np.ndarray:
+        x = np.clip(x, -30.0, 30.0)
+        return 1.0 / (1.0 + np.exp(-x))
+
+    @staticmethod
+    def _sorted_property_names(names: Sequence[str], prefix: str) -> list[str]:
+        items = [name for name in names if name.startswith(prefix)]
+
+        def key(name: str) -> int:
+            try:
+                return int(name[len(prefix):])
+            except ValueError:
+                return 10**9
+
+        return sorted(items, key=key)
+
+    def _load_gaussians(self, gaussian_ply: str) -> None:
+        path = Path(gaussian_ply).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"3DGS PLY does not exist: {path}")
+
+        ply = self.PlyData.read(str(path))
+        if "vertex" not in ply:
+            raise ValueError(f"PLY has no vertex element: {path}")
+        vertex = ply["vertex"].data
+        names = list(vertex.dtype.names or ())
+        name_set = set(names)
+
+        required = {
+            "x", "y", "z", "opacity",
+            "scale_0", "scale_1", "scale_2",
+            "rot_0", "rot_1", "rot_2", "rot_3",
+        }
+        missing = sorted(required - name_set)
+        if missing:
+            raise ValueError(
+                "3DGS PLY is missing geometry properties: " + ", ".join(missing)
+            )
+
+        means = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float32)
+        scales = np.stack(
+            [vertex["scale_0"], vertex["scale_1"], vertex["scale_2"]], axis=1
+        ).astype(np.float32)
+        quats = np.stack(
+            [vertex["rot_0"], vertex["rot_1"], vertex["rot_2"], vertex["rot_3"]],
+            axis=1,
+        ).astype(np.float32)
+        opacities = np.asarray(vertex["opacity"], dtype=np.float32)
+
+        if self.config.scale_activation == "exp":
+            scales = np.exp(np.clip(scales, -20.0, 20.0))
+        elif self.config.scale_activation != "identity":
+            raise ValueError(f"Unknown scale_activation={self.config.scale_activation}")
+
+        if self.config.opacity_activation == "sigmoid":
+            opacities = self._sigmoid_numpy(opacities)
+        elif self.config.opacity_activation != "identity":
+            raise ValueError(f"Unknown opacity_activation={self.config.opacity_activation}")
+
+        quat_norm = np.linalg.norm(quats, axis=1, keepdims=True)
+        quats = quats / np.maximum(quat_norm, 1e-8)
+
+        # Standard 3DGS SH property layout.  When unavailable we still support
+        # depth/alpha rendering and emit a neutral gray RGB fallback.
+        dc_names = self._sorted_property_names(names, "f_dc_")
+        rest_names = self._sorted_property_names(names, "f_rest_")
+        sh_coeffs = None
+        sh_degree = None
+        if len(dc_names) >= 3:
+            dc = np.stack([vertex[name] for name in dc_names[:3]], axis=1).astype(np.float32)
+            dc = dc[:, None, :]  # N,1,3
+            if rest_names and len(rest_names) % 3 == 0:
+                rest_flat = np.stack([vertex[name] for name in rest_names], axis=1).astype(np.float32)
+                # Original 3DGS PLY flattens [3, Krest] after transpose.
+                k_rest = len(rest_names) // 3
+                rest = rest_flat.reshape(len(rest_flat), 3, k_rest).transpose(0, 2, 1)
+                sh_coeffs = np.concatenate([dc, rest], axis=1)
+            else:
+                sh_coeffs = dc
+
+            k = int(sh_coeffs.shape[1])
+            inferred = int(round(np.sqrt(k) - 1))
+            if (inferred + 1) ** 2 != k:
+                inferred = 0
+                sh_coeffs = dc
+            if self.config.max_sh_degree is not None:
+                inferred = min(inferred, int(self.config.max_sh_degree))
+                keep = (inferred + 1) ** 2
+                sh_coeffs = sh_coeffs[:, :keep]
+            sh_degree = inferred
+
+        finite = (
+            np.all(np.isfinite(means), axis=1)
+            & np.all(np.isfinite(scales), axis=1)
+            & np.all(np.isfinite(quats), axis=1)
+            & np.isfinite(opacities)
+            & (opacities > 1e-6)
+        )
+        if sh_coeffs is not None:
+            finite &= np.all(np.isfinite(sh_coeffs), axis=(1, 2))
+
+        means = means[finite]
+        scales = scales[finite]
+        quats = quats[finite]
+        opacities = opacities[finite]
+        if sh_coeffs is not None:
+            sh_coeffs = sh_coeffs[finite]
+        if len(means) == 0:
+            raise ValueError(f"No valid Gaussians found in {path}")
+
+        self.source_path = str(path)
+        self.means_np = means
+        self.scales_np = scales
+        self.opacities_np = opacities
+        self.max_scale_np = np.max(scales, axis=1)
+        self.sh_degree = sh_degree
+
+        torch = self.torch
+        self.means = torch.from_numpy(means).to(self.device)
+        self.scales = torch.from_numpy(scales).to(self.device)
+        self.quats = torch.from_numpy(quats).to(self.device)
+        self.opacities = torch.from_numpy(opacities).to(self.device)
+
+        if sh_coeffs is None:
+            self.colors = torch.full(
+                (len(means), 3), 0.5, dtype=torch.float32, device=self.device
+            )
+            self.sh_degree = None
+        else:
+            self.colors = torch.from_numpy(sh_coeffs).to(self.device)
+
+    @staticmethod
+    def scaled_intrinsics(camera, width: int, height: int) -> np.ndarray:
+        sx = float(width) / float(camera.width)
+        sy = float(height) / float(camera.height)
+        return np.array(
+            [
+                [camera.fx * sx, 0.0, camera.cx * sx],
+                [0.0, camera.fy * sy, camera.cy * sy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def resolve_size(camera, max_image_dim: Optional[int] = None) -> tuple[int, int]:
+        if max_image_dim is None or int(max_image_dim) <= 0:
+            return int(camera.width), int(camera.height)
+        max_dim = max(16, int(max_image_dim))
+        scale = min(1.0, max_dim / float(max(camera.width, camera.height)))
+        width = max(16, int(round(camera.width * scale)))
+        height = max(16, int(round(camera.height * scale)))
+        return width, height
+
+    def render(
+        self,
+        camera,
+        *,
+        max_image_dim: Optional[int] = None,
+        need_rgb: bool = True,
+        need_depth: bool = True,
+    ) -> GaussianRenderResult:
+        """Render RGB/alpha/expected-depth for one camera."""
+        torch = self.torch
+        width, height = self.resolve_size(camera, max_image_dim)
+        K = self.scaled_intrinsics(camera, width, height)
+        c2w = torch.from_numpy(camera.c2w.astype(np.float32)).to(self.device)[None]
+        K_t = torch.from_numpy(K).to(self.device)[None]
+
+        # RGB+D is also used for depth-only calls because it is broadly supported
+        # across gsplat versions used in existing 3DGS environments.
+        render_mode = "RGB+D" if need_depth else "RGB"
+        bg = torch.tensor(self.config.background, dtype=torch.float32, device=self.device)
+
+        with torch.no_grad():
+            colors, alphas, _ = self.rasterization(
+                means=self.means,
+                quats=self.quats,
+                scales=self.scales,
+                opacities=self.opacities,
+                colors=self.colors,
+                viewmats=torch.linalg.inv(c2w),
+                Ks=K_t,
+                width=width,
+                height=height,
+                render_mode=render_mode,
+                sh_degree=self.sh_degree,
+                backgrounds=bg[None],
+            )
+
+        alpha_t = alphas[0, ..., 0]
+        alpha = alpha_t.detach().float().cpu().numpy()
+
+        rgb = None
+        if need_rgb:
+            rgb_t = colors[0, ..., :3]
+            rgb = rgb_t.detach().float().cpu().numpy().astype(np.float32)
+
+        depth = None
+        if need_depth:
+            accum_depth = colors[0, ..., 3]
+            expected = accum_depth / torch.clamp(alpha_t, min=1e-6)
+            expected = torch.where(alpha_t > 1e-6, expected, torch.zeros_like(expected))
+            depth = expected.detach().float().cpu().numpy().astype(np.float32)
+
+        return GaussianRenderResult(
+            rgb=rgb,
+            alpha=alpha.astype(np.float32),
+            depth=depth,
+            width=width,
+            height=height,
+        )
+
+    def render_rgb(self, camera, max_image_dim: Optional[int] = None) -> np.ndarray:
+        result = self.render(
+            camera,
+            max_image_dim=max_image_dim,
+            need_rgb=True,
+            need_depth=False,
+        )
+        assert result.rgb is not None
+        return result.rgb
+
+    def render_depth(self, camera, max_image_dim: Optional[int] = None) -> GaussianRenderResult:
+        return self.render(
+            camera,
+            max_image_dim=max_image_dim,
+            need_rgb=False,
+            need_depth=True,
+        )
+
+
+if __name__ == "__main__":
+    print("gs_renderer.py: import OK. Instantiate GsplatRenderer with a standard 3DGS PLY for runtime testing.")
