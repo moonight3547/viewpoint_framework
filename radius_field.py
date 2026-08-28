@@ -50,6 +50,11 @@ class RadiusFieldConfig:
 
     strategy: str = "angular_knn"
 
+    # V1 conditions radius support on acquisition mode.  V2 deliberately uses
+    # every finite captured position: a position reached by the capture video is
+    # treated as collision-free evidence independently of camera orientation.
+    support_strategy: str = "mode_only"  # mode_only | all_cameras
+
     # Camera-support interpolation.
     k_neighbors: int = 6
     min_neighbors: int = 3
@@ -166,7 +171,18 @@ class DirectionalRadiusField:
                 f"Unknown radius strategy {self.config.strategy!r}; choices={RADIUS_STRATEGIES}"
             )
 
-        support = [relation for relation in relations if relation.mode == mode]
+        if self.config.support_strategy == "mode_only":
+            support = [relation for relation in relations if relation.mode == mode]
+        elif self.config.support_strategy == "all_cameras":
+            support = [
+                relation
+                for relation in relations
+                if np.isfinite(relation.radius) and relation.radius > EPS
+            ]
+        else:
+            raise ValueError(
+                f"Unknown radius support_strategy: {self.config.support_strategy}"
+            )
         self.support_relations = support
 
         if len(support) > 0:
@@ -178,10 +194,15 @@ class DirectionalRadiusField:
                 [relation.radius for relation in support],
                 dtype=np.float64,
             )
-            self.support_confidences = np.asarray(
-                [max(relation.confidence, 0.0) for relation in support],
-                dtype=np.float64,
-            )
+            if self.config.support_strategy == "all_cameras":
+                # V2's safety prior is position evidence.  Stage-1 orientation
+                # confidence must not silently zero ambiguous/outlier positions.
+                self.support_confidences = np.ones(len(support), dtype=np.float64)
+            else:
+                self.support_confidences = np.asarray(
+                    [max(relation.confidence, 0.0) for relation in support],
+                    dtype=np.float64,
+                )
             self.support_indices = np.asarray(
                 [relation.camera_index for relation in support],
                 dtype=np.int64,

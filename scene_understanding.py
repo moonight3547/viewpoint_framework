@@ -14,7 +14,7 @@ and runtime DirectionalRadiusField objects for later viewpoint generation.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
@@ -32,6 +32,7 @@ from viewpoint_framework.scene_analysis import (
 )
 from viewpoint_framework.scene_types import (
     CameraMode,
+    CameraSceneRelation,
     RadiusFieldSample,
     SceneProfile,
     to_jsonable,
@@ -55,6 +56,14 @@ class RadiusSamplingConfig:
 
 
 @dataclass
+class CenterRefinementConfig:
+    """Optional one-shot center refinement from strict Stage-1 mode support."""
+
+    strategy: str = "none"  # none | dominant_mode_once
+    min_support_ratio: float = 0.20
+
+
+@dataclass
 class SceneUnderstandingConfig:
     """Strategy-composable scene-understanding configuration."""
 
@@ -63,6 +72,9 @@ class SceneUnderstandingConfig:
     view_space: ViewSpaceConfig
     radius: RadiusFieldConfig
     radius_sampling: RadiusSamplingConfig
+    center_refinement: CenterRefinementConfig = field(
+        default_factory=CenterRefinementConfig
+    )
 
     @classmethod
     def default(cls) -> "SceneUnderstandingConfig":
@@ -72,6 +84,7 @@ class SceneUnderstandingConfig:
             view_space=ViewSpaceConfig(),
             radius=RadiusFieldConfig(),
             radius_sampling=RadiusSamplingConfig(),
+            center_refinement=CenterRefinementConfig(),
         )
 
     @classmethod
@@ -84,6 +97,9 @@ class SceneUnderstandingConfig:
             view_space=ViewSpaceConfig(**data.get("view_space", {})),
             radius=RadiusFieldConfig(**data.get("radius", {})),
             radius_sampling=RadiusSamplingConfig(**data.get("radius_sampling", {})),
+            center_refinement=CenterRefinementConfig(
+                **data.get("center_refinement", {})
+            ),
         )
 
     @classmethod
@@ -106,6 +122,7 @@ class SceneUnderstandingConfig:
                 strategy="global_median",
             ),
             radius_sampling=RadiusSamplingConfig(),
+            center_refinement=CenterRefinementConfig(),
         )
 
 
@@ -115,6 +132,60 @@ class SceneUnderstandingResult:
 
     profile: SceneProfile
     radius_fields: Dict[str, DirectionalRadiusField]
+
+
+def _strict_dominant_mode(relations: Sequence[CameraSceneRelation]) -> CameraMode:
+    outside = sum(r.mode == CameraMode.OUTSIDE_IN for r in relations)
+    inside = sum(r.mode == CameraMode.INSIDE_OUT for r in relations)
+    return CameraMode.INSIDE_OUT if inside > outside else CameraMode.OUTSIDE_IN
+
+
+def _refresh_relation_geometry(
+    cameras: Sequence[Camera],
+    relations: Sequence[CameraSceneRelation],
+    center: np.ndarray,
+) -> List[CameraSceneRelation]:
+    """Refresh center-relative geometry without re-running four-way labels."""
+
+    center = np.asarray(center, dtype=np.float64)
+    refreshed: List[CameraSceneRelation] = []
+    for camera, old in zip(cameras, relations):
+        position = np.asarray(camera.position, dtype=np.float64)
+        forward = np.asarray(camera.forward, dtype=np.float64)
+        forward /= max(float(np.linalg.norm(forward)), 1e-10)
+        center_vec = center - position
+        radius = float(np.linalg.norm(center_vec))
+        if radius <= 1e-10:
+            radial = np.zeros(3, dtype=np.float64)
+            lam = 0.0
+            residual = 0.0
+            alignment = 90.0
+            residual_ratio = float("inf")
+        else:
+            radial = (position - center) / radius
+            lam = float(np.dot(forward, center_vec))
+            residual = float(np.linalg.norm(center_vec - lam * forward))
+            residual_ratio = residual / radius
+            alignment = float(
+                np.degrees(np.arccos(np.clip(abs(lam) / radius, 0.0, 1.0)))
+            )
+        refreshed.append(
+            CameraSceneRelation(
+                camera_index=old.camera_index,
+                position=position,
+                forward=forward,
+                radius=radius,
+                radial_direction=radial,
+                lambda_center=lam,
+                sight_residual=residual,
+                residual_ratio=residual_ratio,
+                alignment_deg=alignment,
+                robust_weight=old.robust_weight,
+                mode=old.mode,
+                confidence=old.confidence,
+            )
+        )
+    return refreshed
 
 
 def _sample_radius_field(
@@ -215,6 +286,57 @@ def understand_scene(
         config=config.mode,
     )
 
+    refinement_metadata = {
+        "strategy": config.center_refinement.strategy,
+        "applied": False,
+        "initial_center": center_fit.center.astype(float).tolist(),
+    }
+    if config.center_refinement.strategy == "dominant_mode_once":
+        dominant = _strict_dominant_mode(camera_relations)
+        support_indices = [
+            i for i, relation in enumerate(camera_relations)
+            if relation.mode == dominant
+        ]
+        support_ratio = len(support_indices) / float(len(cameras))
+        refinement_metadata.update(
+            {
+                "dominant_mode": dominant.value,
+                "support_count": len(support_indices),
+                "support_ratio": support_ratio,
+            }
+        )
+        if support_ratio >= float(config.center_refinement.min_support_ratio):
+            initial_center = center_fit.center.copy()
+            center_fit = estimate_scene_center(
+                cameras=[cameras[i] for i in support_indices],
+                config=config.center,
+            )
+            camera_relations = _refresh_relation_geometry(
+                cameras, camera_relations, center_fit.center
+            )
+            refinement_metadata.update(
+                {
+                    "applied": True,
+                    "refined_center": center_fit.center.astype(float).tolist(),
+                    "center_shift": float(
+                        np.linalg.norm(center_fit.center - initial_center)
+                    ),
+                    "note": (
+                        "Four-way Stage-1 labels were preserved; only "
+                        "center-relative geometry was refreshed."
+                    ),
+                }
+            )
+        else:
+            refinement_metadata["note"] = (
+                "Skipped: strict dominant-mode support is below min_support_ratio."
+            )
+    elif config.center_refinement.strategy != "none":
+        raise ValueError(
+            "Unknown center_refinement strategy: "
+            f"{config.center_refinement.strategy}"
+        )
+
     # ------------------------------------------------------------------
     # 3. Spherical scene frame + per-mode bbox.
     # ------------------------------------------------------------------
@@ -234,7 +356,10 @@ def understand_scene(
 
     for mode in (CameraMode.OUTSIDE_IN, CameraMode.INSIDE_OUT):
         key = mode.value
-        if key not in view_bboxes:
+        if (
+            key not in view_bboxes
+            and config.radius.support_strategy != "all_cameras"
+        ):
             continue
 
         field = DirectionalRadiusField(
@@ -243,17 +368,22 @@ def understand_scene(
             relations=camera_relations,
             config=config.radius,
             point_cloud_points=point_cloud_points,
-            radius_bounds=view_bboxes[key].observed_radius,
+            radius_bounds=(
+                view_bboxes[key].observed_radius
+                if key in view_bboxes
+                else None
+            ),
         )
         radius_fields[key] = field
 
-        radius_samples[key] = _sample_radius_field(
-            mode=mode,
-            field=field,
-            bbox=view_bboxes[key],
-            frame=frame,
-            config=config.radius_sampling,
-        )
+        if key in view_bboxes:
+            radius_samples[key] = _sample_radius_field(
+                mode=mode,
+                field=field,
+                bbox=view_bboxes[key],
+                frame=frame,
+                config=config.radius_sampling,
+            )
 
     strategy_config = {
         "center": asdict(config.center),
@@ -261,6 +391,7 @@ def understand_scene(
         "view_space": asdict(config.view_space),
         "radius": asdict(config.radius),
         "radius_sampling": asdict(config.radius_sampling),
+        "center_refinement": asdict(config.center_refinement),
     }
 
     profile = SceneProfile(
@@ -271,7 +402,10 @@ def understand_scene(
         view_bboxes=view_bboxes,
         radius_field_samples=radius_samples,
         strategy_config=to_jsonable(strategy_config),
-        metadata=dict(metadata or {}),
+        metadata={
+            **dict(metadata or {}),
+            "center_refinement": refinement_metadata,
+        },
     )
 
     return SceneUnderstandingResult(

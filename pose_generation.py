@@ -40,6 +40,7 @@ from viewpoint_framework.gs_depth_probe import (
 )
 from viewpoint_framework.scene_types import (
     CameraMode,
+    CameraSceneRelation,
     GlobalCollectionMode,
     SceneProfile,
     ViewBBox,
@@ -48,6 +49,7 @@ from viewpoint_framework.scene_types import (
 from viewpoint_framework.scene_understanding import SceneUnderstandingResult
 from viewpoint_framework.view_space import (
     azimuth_elevation_to_direction,
+    direction_to_azimuth_elevation,
     expand_circular_interval,
     minimal_circular_interval,
     sample_circular_interval,
@@ -67,7 +69,7 @@ class PoseGenerationConfig:
     """Compact configuration with strategy hooks for later ablations."""
 
     # Default observation mode.
-    mode_strategy: str = "count_majority"     # count_majority | weighted_majority | legacy_majority | forced
+    mode_strategy: str = "count_majority"     # count_majority | weighted_majority | legacy_majority | binary_count_majority | forced
     forced_mode: Optional[str] = None          # outside_in | inside_out
 
     # Angular grid.
@@ -75,6 +77,14 @@ class PoseGenerationConfig:
     azimuth_step_deg: float = 20.0
     elevation_step_deg: float = 20.0
     include_bbox_end: bool = True
+
+    # V2 reconstructs Stage-2 spatial support from a fresh binary classification
+    # around the (optionally refined) Stage-1 center.
+    bbox_strategy: str = "scene_profile"  # scene_profile | binary_dominant
+    azimuth_extension_ratio: float = 0.10
+    elevation_extension_ratio: float = 0.10
+    bbox_elevation_percentiles: Tuple[float, float] = (2.0, 98.0)
+    bbox_radius_percentiles: Tuple[float, float] = (5.0, 95.0)
 
     # Initial radial projection.
     radius_strategy: str = "directional"       # directional | azimuth_only | bbox_median
@@ -99,8 +109,12 @@ class PoseGenerationConfig:
     center_principal_point: bool = True
 
     # Endpoint view-limits export.
-    view_limits_strategy: str = "generation_bbox"  # generation_bbox | observed_bbox
+    view_limits_strategy: str = "generation_bbox"  # generation_bbox | observed_bbox | v2_observed_dominant_radius
     view_limits_unwrap_azimuth: bool = True
+    view_limits_radius_percentiles: Tuple[float, float] = (40.0, 60.0)
+
+    # Compact V2 diagnostics: one grid point or candidate per console line.
+    console_log_candidates: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
@@ -166,6 +180,7 @@ class PoseGenerationResult:
     candidates: List[GeneratedCandidate]
     valid_cameras: List[Camera]
     config: PoseGenerationConfig
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -222,6 +237,161 @@ def choose_observation_mode(
         strategy=strategy,
         note=note,
     )
+
+
+def classify_stage2_binary(
+    cameras: Sequence[Camera],
+    center: np.ndarray,
+) -> List[CameraSceneRelation]:
+    """Assign every finite captured pose to Outside-In or Inside-Out.
+
+    Unlike Stage 1, this intentionally has no ambiguous/outlier acquisition
+    labels.  Stage-1 robust weights remain useful for understanding and center
+    refinement, while Stage 2 needs complete spatial support.
+    """
+
+    center = np.asarray(center, dtype=np.float64)
+    relations: List[CameraSceneRelation] = []
+    for camera in cameras:
+        position = np.asarray(camera.position, dtype=np.float64)
+        forward = np.asarray(camera.forward, dtype=np.float64)
+        forward /= max(float(np.linalg.norm(forward)), EPS)
+        center_vec = center - position
+        radius = float(np.linalg.norm(center_vec))
+        if not np.isfinite(radius) or radius <= EPS:
+            raise ValueError(
+                f"Camera {camera.index} is at/invalid relative to the refined scene center."
+            )
+        radial = (position - center) / radius
+        lam = float(np.dot(forward, center_vec))
+        residual = float(np.linalg.norm(center_vec - lam * forward))
+        alignment = float(
+            np.degrees(np.arccos(np.clip(abs(lam) / radius, 0.0, 1.0)))
+        )
+        mode = CameraMode.OUTSIDE_IN if lam > 0.0 else CameraMode.INSIDE_OUT
+        relations.append(
+            CameraSceneRelation(
+                camera_index=int(camera.index),
+                position=position,
+                forward=forward,
+                radius=radius,
+                radial_direction=radial,
+                lambda_center=lam,
+                sight_residual=residual,
+                residual_ratio=residual / radius,
+                alignment_deg=alignment,
+                robust_weight=1.0,
+                mode=mode,
+                confidence=1.0,
+            )
+        )
+    return relations
+
+
+def choose_binary_count_majority(
+    relations: Sequence[CameraSceneRelation],
+) -> ObservationModeResult:
+    outside = sum(r.mode == CameraMode.OUTSIDE_IN for r in relations)
+    inside = len(relations) - outside
+    mode = CameraMode.INSIDE_OUT if inside > outside else CameraMode.OUTSIDE_IN
+    winner = max(outside, inside)
+    return ObservationModeResult(
+        mode=mode,
+        confidence=winner / float(max(len(relations), 1)),
+        strategy="binary_count_majority",
+        note=f"all captured poses binary-classified: outside={outside}, inside={inside}",
+    )
+
+
+def _percentile_bounds(
+    values: np.ndarray,
+    percentiles: Tuple[float, float],
+    name: str,
+) -> Tuple[float, float]:
+    low, high = [float(x) for x in percentiles]
+    if not (0.0 <= low <= high <= 100.0):
+        raise ValueError(f"Invalid {name} percentiles: {percentiles}")
+    result = np.percentile(np.asarray(values, dtype=np.float64), [low, high])
+    return float(result[0]), float(result[1])
+
+
+def build_v2_dominant_bbox(
+    relations: Sequence[CameraSceneRelation],
+    mode: CameraMode,
+    profile: SceneProfile,
+    config: PoseGenerationConfig,
+) -> Tuple[ViewBBox, List[CameraSceneRelation]]:
+    support = [r for r in relations if r.mode == mode]
+    if not support:
+        raise ValueError(f"V2 binary classification has no {mode.value} support.")
+
+    frame = profile.coordinate_frame
+    azimuths: List[float] = []
+    elevations: List[float] = []
+    radii: List[float] = []
+    for relation in support:
+        az, el = direction_to_azimuth_elevation(
+            relation.radial_direction, frame
+        )
+        relation.azimuth_deg = float(az)
+        relation.elevation_deg = float(el)
+        azimuths.append(float(az))
+        elevations.append(float(el))
+        radii.append(float(relation.radius))
+
+    observed_azimuth = minimal_circular_interval(azimuths)
+    az_extension = max(
+        0.0,
+        float(config.azimuth_extension_ratio) * observed_azimuth.span_deg,
+    )
+    # expand_circular_interval correctly keeps arcs >180 degrees expanding and
+    # saturates only when the full 360-degree circle has been reached.
+    generation_azimuth = expand_circular_interval(observed_azimuth, az_extension)
+
+    observed_elevation = _percentile_bounds(
+        np.asarray(elevations),
+        config.bbox_elevation_percentiles,
+        "bbox elevation",
+    )
+    elevation_span = max(0.0, observed_elevation[1] - observed_elevation[0])
+    elevation_extension = max(
+        0.0,
+        float(config.elevation_extension_ratio) * elevation_span,
+    )
+    generation_elevation = (
+        max(-89.9, observed_elevation[0] - elevation_extension),
+        min(89.9, observed_elevation[1] + elevation_extension),
+    )
+
+    observed_radius = _percentile_bounds(
+        np.asarray(radii), config.bbox_radius_percentiles, "bbox radius"
+    )
+    if observed_radius[1] < observed_radius[0] + EPS:
+        observed_radius = (
+            observed_radius[0],
+            observed_radius[0] + max(1e-3, 0.05 * max(observed_radius[0], 1.0)),
+        )
+
+    bbox = ViewBBox(
+        mode=mode,
+        strategy="v2_binary_dominant_robust",
+        camera_indices=[int(r.camera_index) for r in support],
+        observed_azimuth=observed_azimuth,
+        observed_elevation_deg=observed_elevation,
+        observed_radius=observed_radius,
+        generation_azimuth=generation_azimuth,
+        generation_elevation_deg=generation_elevation,
+        generation_radius=observed_radius,
+        angular_extension_deg=float(az_extension),
+        radius_extension=0.0,
+        support_camera_count=len(support),
+        notes=[
+            f"V2 azimuth extension per side={config.azimuth_extension_ratio:.4f}*span.",
+            f"V2 elevation extension per side={config.elevation_extension_ratio:.4f}*span "
+            f"({elevation_extension:.4f} deg).",
+        ],
+    )
+    return bbox, support
 
 
 # -----------------------------------------------------------------------------
@@ -315,6 +485,7 @@ def build_view_limits(
     profile: SceneProfile,
     bbox: ViewBBox,
     config: PoseGenerationConfig,
+    dominant_relations: Optional[Sequence[CameraSceneRelation]] = None,
 ) -> Dict[str, Any]:
     if config.view_limits_strategy == "generation_bbox":
         az = bbox.generation_azimuth
@@ -324,6 +495,18 @@ def build_view_limits(
         az = bbox.observed_azimuth
         elevation_min, elevation_max = bbox.observed_elevation_deg
         radius_min, radius_max = bbox.observed_radius
+    elif config.view_limits_strategy == "v2_observed_dominant_radius":
+        if not dominant_relations:
+            raise ValueError(
+                "v2_observed_dominant_radius requires dominant binary relations."
+            )
+        az = bbox.observed_azimuth
+        elevation_min, elevation_max = bbox.observed_elevation_deg
+        radius_min, radius_max = _percentile_bounds(
+            np.asarray([r.radius for r in dominant_relations], dtype=np.float64),
+            config.view_limits_radius_percentiles,
+            "view-limits radius",
+        )
     else:
         raise ValueError(
             f"Unknown view_limits_strategy: {config.view_limits_strategy}"
@@ -569,16 +752,23 @@ def save_cameras_json(cameras: Sequence[Camera], output_path: str) -> None:
 # Initial radius projection
 # -----------------------------------------------------------------------------
 
-def _mode_radii(profile: SceneProfile, mode: CameraMode) -> np.ndarray:
+def _mode_radii(
+    profile: SceneProfile,
+    mode: CameraMode,
+    relations: Optional[Sequence[CameraSceneRelation]] = None,
+) -> np.ndarray:
+    source_relations = (
+        list(relations) if relations is not None else profile.camera_relations
+    )
     radii = [
         float(r.radius)
-        for r in profile.camera_relations
+        for r in source_relations
         if r.mode == mode and np.isfinite(r.radius) and r.radius > EPS
     ]
     if not radii:
         radii = [
             float(r.radius)
-            for r in profile.camera_relations
+            for r in source_relations
             if np.isfinite(r.radius) and r.radius > EPS
         ]
     return np.asarray(radii, dtype=np.float64)
@@ -590,6 +780,7 @@ def resolve_initial_radius(
     bbox: ViewBBox,
     scene_result: SceneUnderstandingResult,
     config: PoseGenerationConfig,
+    generation_relations: Optional[Sequence[CameraSceneRelation]] = None,
 ) -> Tuple[float, float, str]:
     field = scene_result.radius_fields.get(mode.value)
     estimate = None
@@ -625,7 +816,9 @@ def resolve_initial_radius(
         source = f"radius_field:{estimate.strategy}"
     else:
         if config.radius_fallback == "mode_median":
-            radii = _mode_radii(scene_result.profile, mode)
+            radii = _mode_radii(
+                scene_result.profile, mode, relations=generation_relations
+            )
             if len(radii):
                 radius = float(np.median(radii))
                 source = "fallback:mode_median"
@@ -835,6 +1028,35 @@ def _place_inside_out(
 # Main generation
 # -----------------------------------------------------------------------------
 
+
+def _compact_float(value: Optional[float]) -> str:
+    if value is None:
+        return "na"
+    value = float(value)
+    return f"{value:.4f}" if np.isfinite(value) else str(value)
+
+
+def _print_candidate_line(candidate: GeneratedCandidate) -> None:
+    depth = candidate.depth_probe
+    notes = "|".join(candidate.notes) if candidate.notes else "-"
+    print(
+        "[S2:CANDIDATE] "
+        f"grid={candidate.grid_id} row={candidate.row} col={candidate.col} "
+        f"az_deg={candidate.azimuth_deg:.4f} el_deg={candidate.elevation_deg:.4f} "
+        f"r_init={candidate.initial_radius:.4f} "
+        f"r_signed={candidate.final_signed_radius:.4f} "
+        f"r_abs={abs(candidate.final_signed_radius):.4f} "
+        f"radius_source={candidate.initial_radius_source} "
+        f"radius_conf={candidate.initial_radius_confidence:.4f} "
+        f"depth_valid={bool(depth.valid) if depth is not None else False} "
+        f"depth_conf={_compact_float(depth.confidence if depth is not None else None)} "
+        f"clearance_init={_compact_float(candidate.initial_clearance)} "
+        f"clearance_final={_compact_float(candidate.final_clearance)} "
+        f"path_safe={_compact_float(candidate.path_safe_fraction)} "
+        f"status={candidate.status.value} "
+        f"reject={candidate.reject_reason or '-'} notes={notes}"
+    )
+
 def generate_candidate_poses(
     captured_cameras: Sequence[Camera],
     scene_result: SceneUnderstandingResult,
@@ -846,10 +1068,55 @@ def generate_candidate_poses(
     profile = scene_result.profile
     depth_probe = depth_probe or NullDepthProbe()
 
-    mode_result = choose_observation_mode(profile, config)
-    bbox = resolve_generation_bbox(profile, mode_result.mode)
-    view_limits = build_view_limits(profile, bbox, config)
+    generation_relations: Optional[List[CameraSceneRelation]] = None
+    dominant_relations: Optional[List[CameraSceneRelation]] = None
+    if config.mode_strategy == "binary_count_majority":
+        generation_relations = classify_stage2_binary(
+            captured_cameras, profile.center_fit.center
+        )
+        mode_result = choose_binary_count_majority(generation_relations)
+    else:
+        mode_result = choose_observation_mode(profile, config)
+
+    if config.bbox_strategy == "binary_dominant":
+        if generation_relations is None:
+            raise ValueError(
+                "bbox_strategy='binary_dominant' requires "
+                "mode_strategy='binary_count_majority'."
+            )
+        bbox, dominant_relations = build_v2_dominant_bbox(
+            generation_relations, mode_result.mode, profile, config
+        )
+    elif config.bbox_strategy == "scene_profile":
+        bbox = resolve_generation_bbox(profile, mode_result.mode)
+    else:
+        raise ValueError(f"Unknown bbox_strategy: {config.bbox_strategy}")
+
+    view_limits = build_view_limits(
+        profile, bbox, config, dominant_relations=dominant_relations
+    )
     grid = generate_angular_grid(profile, bbox, config)
+
+    if config.console_log_candidates:
+        az_rows: Dict[int, int] = {}
+        for point in grid:
+            az_rows[point.row] = az_rows.get(point.row, 0) + 1
+        print(
+            "[S2:BBOX] "
+            f"mode={mode_result.mode.value} support={bbox.support_camera_count} "
+            f"az_obs_deg={bbox.observed_azimuth.span_deg:.4f} "
+            f"az_gen_deg={bbox.generation_azimuth.span_deg:.4f} "
+            f"el_obs_deg=({bbox.observed_elevation_deg[0]:.4f},{bbox.observed_elevation_deg[1]:.4f}) "
+            f"el_gen_deg=({bbox.generation_elevation_deg[0]:.4f},{bbox.generation_elevation_deg[1]:.4f}) "
+            f"r_gen=({bbox.generation_radius[0]:.4f},{bbox.generation_radius[1]:.4f}) "
+            f"el_rows={len(az_rows)} az_per_row={list(az_rows.values())} grid={len(grid)}"
+        )
+        for point in grid:
+            print(
+                "[S2:GRID] "
+                f"grid={point.grid_id} row={point.row} col={point.col} "
+                f"az_deg={point.azimuth_deg:.4f} el_deg={point.elevation_deg:.4f}"
+            )
 
     safety = None
     if point_cloud_points is not None and config.geometry.strategy != "none":
@@ -866,6 +1133,7 @@ def generate_candidate_poses(
             bbox=bbox,
             scene_result=scene_result,
             config=config,
+            generation_relations=generation_relations,
         )
         initial_position = center + initial_radius * point.direction
 
@@ -897,6 +1165,8 @@ def generate_candidate_poses(
                         reject_reason="UNSAFE_INITIAL_RADIUS",
                     )
                 )
+                if config.console_log_candidates:
+                    _print_candidate_line(candidates[-1])
                 continue
 
         if mode_result.mode == CameraMode.OUTSIDE_IN:
@@ -958,6 +1228,8 @@ def generate_candidate_poses(
                         notes=notes,
                     )
                 )
+                if config.console_log_candidates:
+                    _print_candidate_line(candidates[-1])
                 continue
 
         camera = build_generated_camera(
@@ -995,6 +1267,62 @@ def generate_candidate_poses(
             )
         )
 
+        if config.console_log_candidates:
+            _print_candidate_line(candidates[-1])
+
+    row_counts: Dict[int, int] = {}
+    for point in grid:
+        row_counts[point.row] = row_counts.get(point.row, 0) + 1
+    diagnostics = {
+        "stage2_binary_counts": (
+            {
+                "outside_in": sum(
+                    r.mode == CameraMode.OUTSIDE_IN
+                    for r in (generation_relations or [])
+                ),
+                "inside_out": sum(
+                    r.mode == CameraMode.INSIDE_OUT
+                    for r in (generation_relations or [])
+                ),
+            }
+            if generation_relations is not None
+            else None
+        ),
+        "dominant_support_count": len(dominant_relations or []),
+        "elevation_sample_count": len(row_counts),
+        "azimuth_samples_per_row": list(row_counts.values()),
+        "angular_grid_count": len(grid),
+        "radius_direct_count": sum(
+            c.initial_radius_source.startswith("radius_field:") for c in candidates
+        ),
+        "radius_fallback_count": sum(
+            c.initial_radius_source.startswith("fallback:") for c in candidates
+        ),
+        "depth_probe_failed_count": sum(
+            c.depth_probe is not None and not c.depth_probe.valid for c in candidates
+        ),
+        "path_clipped_count": sum(
+            c.path_safe_fraction is not None and c.path_safe_fraction < 1.0 - 1e-9
+            for c in candidates
+        ),
+        "rejection_reasons": {
+            reason: sum(c.reject_reason == reason for c in candidates)
+            for reason in sorted(
+                {c.reject_reason for c in candidates if c.reject_reason is not None}
+            )
+        },
+        "valid_candidate_count": len(valid_cameras),
+    }
+    if config.console_log_candidates:
+        print(
+            "[S2:FUNNEL] "
+            f"grid={len(grid)} direct_radius={diagnostics['radius_direct_count']} "
+            f"fallback_radius={diagnostics['radius_fallback_count']} "
+            f"depth_failed={diagnostics['depth_probe_failed_count']} "
+            f"path_clipped={diagnostics['path_clipped_count']} "
+            f"rejections={diagnostics['rejection_reasons']} valid={len(valid_cameras)}"
+        )
+
     return PoseGenerationResult(
         mode=mode_result,
         bbox=bbox,
@@ -1002,6 +1330,7 @@ def generate_candidate_poses(
         candidates=candidates,
         valid_cameras=valid_cameras,
         config=config,
+        diagnostics=diagnostics,
     )
 
 
@@ -1030,6 +1359,7 @@ def save_pose_generation_result(
         "num_candidates": len(result.candidates),
         "num_valid": len(result.valid_cameras),
         "num_rejected": len(result.candidates) - len(result.valid_cameras),
+        "diagnostics": to_jsonable(result.diagnostics),
         "candidates": to_jsonable(result.candidates),
     }
     with open(meta_path, "w", encoding="utf-8") as f:

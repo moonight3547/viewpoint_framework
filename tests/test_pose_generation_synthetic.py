@@ -4,7 +4,10 @@ from viewpoint_framework.cameras_util import Camera
 from viewpoint_framework.gs_depth_probe import DepthProbeResult
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
+    build_view_limits,
+    build_v2_dominant_bbox,
     camera_to_18d,
+    classify_stage2_binary,
     generate_candidate_poses,
 )
 from viewpoint_framework.scene_types import (
@@ -198,3 +201,99 @@ def test_inside_out_cross_center_keeps_inside_out_forward():
     assert camera.position[2] < -1.0
     assert np.allclose(camera.forward, [0.0, 0.0, 1.0])
     assert result.candidates[0].crossed_center
+
+
+def _camera_at(index, position, forward):
+    position = np.asarray(position, dtype=np.float64)
+    forward = np.asarray(forward, dtype=np.float64)
+    forward /= np.linalg.norm(forward)
+    up = np.array([0.0, 1.0, 0.0])
+    if abs(float(np.dot(up, forward))) > 0.95:
+        up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(forward, up)
+    right /= np.linalg.norm(right)
+    true_up = np.cross(right, forward)
+    c2w = np.eye(4)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = -true_up
+    c2w[:3, 2] = forward
+    c2w[:3, 3] = position
+    return Camera(
+        index=index,
+        fx=100.0,
+        fy=100.0,
+        cx=50.0,
+        cy=50.0,
+        width=100,
+        height=100,
+        w2c=np.linalg.inv(c2w),
+        c2w=c2w,
+    )
+
+
+def test_v2_binary_bbox_expands_past_180_degrees_without_minimum_extension():
+    profile = _profile(CameraMode.OUTSIDE_IN)
+    cameras = []
+    for i, angle_deg in enumerate((-110.0, -30.0, 30.0, 110.0)):
+        angle = np.radians(angle_deg)
+        position = np.array([np.sin(angle), 0.0, np.cos(angle)]) * float(i + 1)
+        cameras.append(_camera_at(i, position, -position))
+    relations = classify_stage2_binary(cameras, np.zeros(3))
+    config = PoseGenerationConfig(
+        mode_strategy="binary_count_majority",
+        bbox_strategy="binary_dominant",
+        azimuth_extension_ratio=0.1,
+        elevation_extension_ratio=0.1,
+        view_limits_strategy="v2_observed_dominant_radius",
+        view_limits_radius_percentiles=(40.0, 60.0),
+    )
+    bbox, support = build_v2_dominant_bbox(
+        relations, CameraMode.OUTSIDE_IN, profile, config
+    )
+
+    assert len(support) == len(cameras)
+    assert bbox.observed_azimuth.span_deg > 180.0
+    assert bbox.generation_azimuth.span_deg > bbox.observed_azimuth.span_deg
+    assert bbox.generation_azimuth.span_deg <= 360.0
+    assert bbox.generation_elevation_deg == (0.0, 0.0)
+    limits = build_view_limits(profile, bbox, config, dominant_relations=support)
+    assert np.isclose(limits["minRadius"], 2.2)
+    assert np.isclose(limits["maxRadius"], 2.8)
+
+
+def test_v2_pose_generation_uses_binary_dominant_bbox_end_to_end():
+    profile = _profile(CameraMode.OUTSIDE_IN)
+    cameras = []
+    for i, angle_deg in enumerate((-60.0, -20.0, 20.0, 60.0)):
+        angle = np.radians(angle_deg)
+        position = np.array([np.sin(angle), 0.0, np.cos(angle)]) * float(i + 1)
+        cameras.append(_camera_at(i, position, -position))
+    scene_result = SceneUnderstandingResult(
+        profile=profile,
+        radius_fields={
+            CameraMode.OUTSIDE_IN.value: _Field(2.5),
+            CameraMode.INSIDE_OUT.value: _Field(2.5),
+        },
+    )
+    config = PoseGenerationConfig(
+        mode_strategy="binary_count_majority",
+        bbox_strategy="binary_dominant",
+        azimuth_step_deg=20.0,
+        elevation_step_deg=20.0,
+        outside_placement_strategy="prior_only",
+        view_limits_strategy="v2_observed_dominant_radius",
+    )
+    config.geometry.strategy = "none"
+    result = generate_candidate_poses(
+        captured_cameras=cameras,
+        scene_result=scene_result,
+        point_cloud_points=None,
+        config=config,
+    )
+
+    assert result.mode.mode == CameraMode.OUTSIDE_IN
+    assert result.bbox.support_camera_count == len(cameras)
+    assert result.diagnostics["angular_grid_count"] == len(result.candidates)
+    assert len(result.valid_cameras) == len(result.candidates)
+    assert np.isclose(result.view_limits["minRadius"], 2.2)
+    assert np.isclose(result.view_limits["maxRadius"], 2.8)
