@@ -305,18 +305,6 @@ class GsplatRenderer:
         render_mode = "RGB+D" if need_depth else "RGB"
         bg = torch.tensor(self.config.background, dtype=torch.float32, device=self.device)
 
-        # Geometry depth probe does not need a raster background.
-        #
-        # This is also important semantically:
-        # after excluding the skybox, a ray through a real scene hole
-        # should remain alpha=0 / invalid depth instead of receiving a
-        # synthetic background contribution.
-        backgrounds = (
-            None
-            if need_depth and not need_rgb
-            else bg[None]
-        )
-
         means, scales, quats = self.means, self.scales, self.quats
         opacities, gaussian_colors = self.opacities, self.colors
         if include_skybox and len(self.skybox_means):
@@ -341,7 +329,7 @@ class GsplatRenderer:
                 height=height,
                 render_mode=render_mode,
                 sh_degree=self.sh_degree,
-                backgrounds=backgrounds,
+                backgrounds=None,
                 near_plane=float(self.config.near_plane),
             )
 
