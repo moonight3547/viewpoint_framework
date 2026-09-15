@@ -104,10 +104,10 @@ class GaussianVisibilityModel(VisibilityModel):
         self.scene_scale = max(float(scene_scale), EPS)
         self._cache: Dict[str, np.ndarray] = {}
 
-        n = len(renderer.means_np)
+        n = len(renderer.geometry_means_np)
         max_samples = max(1, min(int(self.config.max_samples), n))
         rng = np.random.default_rng(int(self.config.random_seed))
-        opacity = np.asarray(renderer.opacities_np, dtype=np.float64)
+        opacity = np.asarray(renderer.geometry_opacities_np, dtype=np.float64)
         probabilities = np.maximum(opacity, 1e-5) ** float(self.config.opacity_power)
         probabilities /= np.sum(probabilities)
         if max_samples < n:
@@ -116,8 +116,8 @@ class GaussianVisibilityModel(VisibilityModel):
             indices = np.arange(n, dtype=np.int64)
 
         self.sample_indices = indices
-        self.sample_points = renderer.means_np[indices].astype(np.float64)
-        self.sample_scales = renderer.max_scale_np[indices].astype(np.float64)
+        self.sample_points = renderer.geometry_means_np[indices].astype(np.float64)
+        self.sample_scales = renderer.geometry_max_scale_np[indices].astype(np.float64)
         weights = opacity[indices].astype(np.float64)
         self.sample_weights = weights / max(float(np.mean(weights)), EPS)
 
@@ -142,7 +142,7 @@ class GaussianVisibilityModel(VisibilityModel):
         if cache_key is not None and cache_key in self._cache:
             return self._cache[cache_key].copy()
 
-        render = self.renderer.render_depth(
+        render = self.renderer.render_geometry_depth(
             camera,
             max_image_dim=int(self.config.max_image_dim),
         )

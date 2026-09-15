@@ -208,12 +208,16 @@ def detect_pointcloud_gaussian_gaps(
         raise ImportError("pointcloud_gaussian_gap requires scipy.spatial.cKDTree") from exc
 
     counts = pointcloud_model.coverage_counts(anchor_cameras, key_prefix="gap_anchor")
-    opacity = np.asarray(renderer.opacities_np, dtype=np.float64)
+    opacity = np.asarray(
+        getattr(renderer, "geometry_opacities_np", renderer.opacities_np), dtype=np.float64
+    )
     gs_mask = opacity >= float(config.gap_min_gaussian_opacity)
     if not np.any(gs_mask):
         return [], counts
-    means = np.asarray(renderer.means_np[gs_mask], dtype=np.float64)
-    scales = np.asarray(renderer.max_scale_np[gs_mask], dtype=np.float64)
+    geometry_means = getattr(renderer, "geometry_means_np", renderer.means_np)
+    geometry_scales = getattr(renderer, "geometry_max_scale_np", renderer.max_scale_np)
+    means = np.asarray(geometry_means[gs_mask], dtype=np.float64)
+    scales = np.asarray(geometry_scales[gs_mask], dtype=np.float64)
     tree = cKDTree(means)
     k = min(4, len(means))
     distances, nearest = tree.query(pointcloud_model.sample_points, k=k)

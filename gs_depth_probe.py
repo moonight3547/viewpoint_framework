@@ -86,7 +86,7 @@ class GsplatDepthProbe:
         self.renderer = renderer
 
     def probe(self, camera) -> DepthProbeResult:
-        result = self.renderer.render_depth(
+        result = self.renderer.render_geometry_depth(
             camera,
             max_image_dim=self.config.max_image_dim,
         )

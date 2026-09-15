@@ -149,6 +149,10 @@ def candidates_from_files(gen_cameras_path: str, gen_meta_path: str) -> tuple[Li
     output: List[SelectionCandidate] = []
     for i, (camera, record) in enumerate(zip(cameras, valid_meta)):
         depth = record.get("depth_probe") or {}
+        geometry = record.get("geometry_metadata") or {}
+        fps_direction = geometry.get(
+            "fps_direction", geometry.get("position_direction", record.get("direction", camera.forward))
+        )
         output.append(
             SelectionCandidate(
                 candidate_id=i,
@@ -157,9 +161,9 @@ def candidates_from_files(gen_cameras_path: str, gen_meta_path: str) -> tuple[Li
                 grid_id=int(record.get("grid_id", i)),
                 row=int(record.get("row", 0)),
                 col=int(record.get("col", i)),
-                azimuth_deg=float(record.get("azimuth_deg", 0.0)),
-                elevation_deg=float(record.get("elevation_deg", 0.0)),
-                observation_direction=np.asarray(record.get("direction", camera.forward), dtype=np.float64),
+                azimuth_deg=float(geometry.get("position_azimuth_deg", record.get("azimuth_deg", 0.0))),
+                elevation_deg=float(geometry.get("position_elevation_deg", record.get("elevation_deg", 0.0))),
+                observation_direction=np.asarray(fps_direction, dtype=np.float64),
                 signed_radius=float(record.get("final_signed_radius", 0.0)),
                 crossed_center=bool(record.get("crossed_center", False)),
                 safety_clearance=record.get("final_clearance"),

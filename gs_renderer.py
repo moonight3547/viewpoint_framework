@@ -14,11 +14,16 @@ Camera convention follows :mod:`viewpoint_framework.cameras_util`:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
+
+from viewpoint_framework.skybox_detection import (
+    SkyboxDetectionConfig,
+    detect_skybox_gaussians,
+)
 
 
 @dataclass
@@ -27,6 +32,37 @@ class GaussianRendererConfig:
     opacity_activation: str = "sigmoid"    # sigmoid | identity
     max_sh_degree: Optional[int] = None     # None -> infer from PLY
     background: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    near_plane: float = 0.01
+    skybox: SkyboxDetectionConfig = field(default_factory=SkyboxDetectionConfig)
+
+
+@dataclass
+class RendererNearPlaneConfig:
+    strategy: str = "captured_radius_ratio"
+    ratio: float = 0.01
+
+
+def resolve_renderer_near_plane(cameras, center, up, config=None) -> float:
+    """Resolve z-near from captured horizontal radii, never raw point AABB."""
+    cfg = config or RendererNearPlaneConfig()
+    if cfg.strategy != "captured_radius_ratio":
+        raise ValueError(f"Unknown renderer near-plane strategy: {cfg.strategy}")
+    center = np.asarray(center, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+    up /= max(float(np.linalg.norm(up)), 1e-10)
+    radii = []
+    for camera in cameras:
+        delta = np.asarray(camera.position, dtype=np.float64) - center
+        horizontal = delta - float(np.dot(delta, up)) * up
+        rho = float(np.linalg.norm(horizontal))
+        if np.isfinite(rho) and rho > 1e-10:
+            radii.append(rho)
+    if not radii:
+        raise ValueError("Cannot resolve renderer near plane without valid captured radii.")
+    ratio = float(cfg.ratio)
+    if not np.isfinite(ratio) or ratio <= 0:
+        raise ValueError("Renderer near-plane ratio must be finite and positive.")
+    return max(ratio * float(np.median(radii)), 1e-6)
 
 
 @dataclass
@@ -177,26 +213,53 @@ class GsplatRenderer:
         if len(means) == 0:
             raise ValueError(f"No valid Gaussians found in {path}")
 
-        self.source_path = str(path)
-        self.means_np = means
-        self.scales_np = scales
-        self.opacities_np = opacities
-        self.max_scale_np = np.max(scales, axis=1)
-        self.sh_degree = sh_degree
-
-        torch = self.torch
-        self.means = torch.from_numpy(means).to(self.device)
-        self.scales = torch.from_numpy(scales).to(self.device)
-        self.quats = torch.from_numpy(quats).to(self.device)
-        self.opacities = torch.from_numpy(opacities).to(self.device)
+        detection = detect_skybox_gaussians(means, scales, self.config.skybox)
+        skybox_mask = detection.skybox_mask
+        geometry_mask = ~skybox_mask
+        if not np.any(geometry_mask):
+            raise ValueError("Skybox detector removed every Gaussian; refusing unsafe classification.")
 
         if sh_coeffs is None:
-            self.colors = torch.full(
-                (len(means), 3), 0.5, dtype=torch.float32, device=self.device
-            )
-            self.sh_degree = None
+            colors_np = np.full((len(means), 3), 0.5, dtype=np.float32)
+            sh_degree = None
         else:
-            self.colors = torch.from_numpy(sh_coeffs).to(self.device)
+            colors_np = sh_coeffs
+
+        self.source_path = str(path)
+        self.skybox_metadata = detection.diagnostics
+        self.skybox_center = detection.skybox_center.astype(np.float64)
+        self.skybox_radius = float(detection.skybox_radius)
+        self.skybox_mask_np = skybox_mask.copy()
+        self.sh_degree = sh_degree
+
+        # Compatibility names intentionally mean geometry-only in V3.1. This
+        # makes legacy Stage-3 sampling safe even before callers migrate to the
+        # explicit geometry_* aliases below.
+        self.geometry_means_np = means[geometry_mask]
+        self.geometry_scales_np = scales[geometry_mask]
+        self.geometry_opacities_np = opacities[geometry_mask]
+        self.geometry_max_scale_np = np.max(self.geometry_scales_np, axis=1)
+        self.means_np = self.geometry_means_np
+        self.scales_np = self.geometry_scales_np
+        self.opacities_np = self.geometry_opacities_np
+        self.max_scale_np = self.geometry_max_scale_np
+
+        self.skybox_means_np = means[skybox_mask]
+        self.skybox_scales_np = scales[skybox_mask]
+        self.skybox_opacities_np = opacities[skybox_mask]
+
+        torch = self.torch
+        # Store disjoint groups: there is no permanent full + geometry duplicate.
+        self.means = torch.from_numpy(means[geometry_mask]).to(self.device)
+        self.scales = torch.from_numpy(scales[geometry_mask]).to(self.device)
+        self.quats = torch.from_numpy(quats[geometry_mask]).to(self.device)
+        self.opacities = torch.from_numpy(opacities[geometry_mask]).to(self.device)
+        self.colors = torch.from_numpy(colors_np[geometry_mask]).to(self.device)
+        self.skybox_means = torch.from_numpy(means[skybox_mask]).to(self.device)
+        self.skybox_scales = torch.from_numpy(scales[skybox_mask]).to(self.device)
+        self.skybox_quats = torch.from_numpy(quats[skybox_mask]).to(self.device)
+        self.skybox_opacities = torch.from_numpy(opacities[skybox_mask]).to(self.device)
+        self.skybox_colors = torch.from_numpy(colors_np[skybox_mask]).to(self.device)
 
     @staticmethod
     def scaled_intrinsics(camera, width: int, height: int) -> np.ndarray:
@@ -228,6 +291,7 @@ class GsplatRenderer:
         max_image_dim: Optional[int] = None,
         need_rgb: bool = True,
         need_depth: bool = True,
+        include_skybox: bool = True,
     ) -> GaussianRenderResult:
         """Render RGB/alpha/expected-depth for one camera."""
         torch = self.torch
@@ -241,13 +305,24 @@ class GsplatRenderer:
         render_mode = "RGB+D" if need_depth else "RGB"
         bg = torch.tensor(self.config.background, dtype=torch.float32, device=self.device)
 
+        means, scales, quats = self.means, self.scales, self.quats
+        opacities, gaussian_colors = self.opacities, self.colors
+        if include_skybox and len(self.skybox_means):
+            # Concatenation is transient. Persistent GPU storage remains disjoint,
+            # while full RGB keeps gsplat's exact depth-sorted compositing.
+            means = torch.cat((means, self.skybox_means), dim=0)
+            scales = torch.cat((scales, self.skybox_scales), dim=0)
+            quats = torch.cat((quats, self.skybox_quats), dim=0)
+            opacities = torch.cat((opacities, self.skybox_opacities), dim=0)
+            gaussian_colors = torch.cat((gaussian_colors, self.skybox_colors), dim=0)
+
         with torch.no_grad():
             colors, alphas, _ = self.rasterization(
-                means=self.means,
-                quats=self.quats,
-                scales=self.scales,
-                opacities=self.opacities,
-                colors=self.colors,
+                means=means,
+                quats=quats,
+                scales=scales,
+                opacities=opacities,
+                colors=gaussian_colors,
                 viewmats=torch.linalg.inv(c2w),
                 Ks=K_t,
                 width=width,
@@ -255,6 +330,7 @@ class GsplatRenderer:
                 render_mode=render_mode,
                 sh_degree=self.sh_degree,
                 backgrounds=bg[None],
+                near_plane=float(self.config.near_plane),
             )
 
         alpha_t = alphas[0, ..., 0]
@@ -297,6 +373,22 @@ class GsplatRenderer:
             need_rgb=False,
             need_depth=True,
         )
+
+    def render_geometry_depth(self, camera, max_image_dim: Optional[int] = None) -> GaussianRenderResult:
+        """Render depth/alpha from scene geometry, explicitly excluding skybox."""
+        return self.render(
+            camera,
+            max_image_dim=max_image_dim,
+            need_rgb=False,
+            need_depth=True,
+            include_skybox=False,
+        )
+
+    def camera_inside_skybox(self, camera, margin: float = 0.0) -> bool:
+        if len(self.skybox_means_np) == 0:
+            return True
+        distance = float(np.linalg.norm(np.asarray(camera.position) - self.skybox_center))
+        return distance < self.skybox_radius - max(float(margin), 0.0)
 
 
 if __name__ == "__main__":

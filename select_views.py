@@ -22,8 +22,13 @@ from pathlib import Path
 import numpy as np
 
 from viewpoint_framework.cameras_util import load_cameras_json
-from viewpoint_framework.gs_renderer import GsplatRenderer
+from viewpoint_framework.gs_renderer import (
+    GaussianRendererConfig,
+    GsplatRenderer,
+    resolve_renderer_near_plane,
+)
 from viewpoint_framework.points_util import load_ply_point_cloud
+from viewpoint_framework.pose_generation import PoseGenerationConfig
 from viewpoint_framework.stage3.pipeline import (
     Stage3Config,
     candidates_from_files,
@@ -136,7 +141,17 @@ def main() -> None:
         world_up = np.array([0.0, 1.0, 0.0])
         fallback_axis = np.array([0.0, 0.0, 1.0])
 
-    renderer = GsplatRenderer(args.gaussian_ply, device=args.device)
+    # Reuse Stage-2 V3.1 renderer semantics so standalone Stage 3 matches E2E.
+    stage2_meta = _load_json(str(gen_meta))
+    pose_cfg = PoseGenerationConfig.from_dict(stage2_meta.get("config", {}))
+    near_plane = resolve_renderer_near_plane(
+        captured, center, world_up, pose_cfg.renderer_near_plane,
+    )
+    renderer = GsplatRenderer(
+        args.gaussian_ply,
+        config=GaussianRendererConfig(near_plane=near_plane, skybox=pose_cfg.skybox),
+        device=args.device,
+    )
     result, paths = run_stage3(
         captured_cameras=captured,
         stage2_candidates=candidates,

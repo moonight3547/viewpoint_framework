@@ -31,6 +31,11 @@ from viewpoint_framework.gs_depth_probe import (
     GsplatDepthProbe,
     NullDepthProbe,
 )
+from viewpoint_framework.gs_renderer import (
+    GaussianRendererConfig,
+    GsplatRenderer,
+    resolve_renderer_near_plane,
+)
 from viewpoint_framework.points_util import load_ply_point_cloud
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
@@ -177,6 +182,19 @@ def main() -> None:
     )
 
     if args.gaussian_ply and not args.no_gs_depth:
+        frame = scene_result.profile.coordinate_frame
+        near_plane = resolve_renderer_near_plane(
+            cameras, scene_result.profile.center_fit.center, frame.y_axis,
+            pose_config.renderer_near_plane,
+        )
+        renderer = GsplatRenderer(
+            args.gaussian_ply,
+            config=GaussianRendererConfig(
+                near_plane=near_plane,
+                skybox=pose_config.skybox,
+            ),
+            device=args.device,
+        )
         probe_config = DepthProbeConfig(
             strategy=args.depth_strategy,
             max_image_dim=args.probe_max_dim,
@@ -185,9 +203,8 @@ def main() -> None:
             alpha_threshold=args.probe_alpha_threshold,
         )
         depth_probe = GsplatDepthProbe(
-            gaussian_ply=args.gaussian_ply,
+            renderer=renderer,
             config=probe_config,
-            device=args.device,
         )
     else:
         depth_probe = NullDepthProbe()
@@ -199,6 +216,19 @@ def main() -> None:
         depth_probe=depth_probe,
         config=pose_config,
     )
+    if args.gaussian_ply and not args.no_gs_depth:
+        result.renderer_metadata = {
+            "near_plane": near_plane,
+            "near_plane_strategy": pose_config.renderer_near_plane.strategy,
+            "skybox": renderer.skybox_metadata,
+        }
+        result.diagnostics.update({
+            "renderer_near_plane": near_plane,
+            "skybox_gaussian_count": renderer.skybox_metadata["skybox_gaussians"],
+            "geometry_gaussian_count": renderer.skybox_metadata["geometry_gaussians"],
+            "skybox_fraction": renderer.skybox_metadata["skybox_fraction"],
+            "skybox_detection_confidence": renderer.skybox_metadata["detection_confidence"],
+        })
     paths = save_pose_generation_result(result, args.output_dir)
 
     print("=" * 72)
@@ -208,6 +238,8 @@ def main() -> None:
     print(f"grid         : {len(result.candidates)} candidates")
     print(f"valid        : {len(result.valid_cameras)}")
     print(f"rejected     : {len(result.candidates) - len(result.valid_cameras)}")
+    print(f"cross capped : {result.diagnostics.get('inside_out_crossing_radius_capped_count', 0)}")
+    print(f"cross fallback: {result.diagnostics.get('inside_out_crossing_fallback_initial_count', 0)}")
     print(f"view limits  : {paths['view_limits']}")
     print(f"cameras      : {paths['gen_cameras']}")
     print(f"metadata     : {paths['gen_cameras_meta']}")

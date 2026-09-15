@@ -11,7 +11,11 @@ from pathlib import Path
 
 from viewpoint_framework.cameras_util import load_cameras_json
 from viewpoint_framework.gs_depth_probe import DepthProbeConfig, GsplatDepthProbe
-from viewpoint_framework.gs_renderer import GsplatRenderer
+from viewpoint_framework.gs_renderer import (
+    GaussianRendererConfig,
+    GsplatRenderer,
+    resolve_renderer_near_plane,
+)
 from viewpoint_framework.points_util import load_ply_point_cloud
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
@@ -125,19 +129,6 @@ def main() -> None:
     cameras = load_cameras_json(args.cameras)
     point_cloud = load_ply_point_cloud(args.point_cloud, max_points=args.pointcloud_max_points)
 
-    # Load Gaussian tensors once and share them across Stage 2/3.
-    renderer = GsplatRenderer(args.gaussian_ply, device=args.device)
-    depth_probe = GsplatDepthProbe(
-        renderer=renderer,
-        config=DepthProbeConfig(
-            strategy=args.depth_strategy,
-            max_image_dim=args.probe_max_dim,
-            central_crop_ratio=args.probe_crop_ratio,
-            depth_quantile=args.probe_quantile,
-            alpha_threshold=args.probe_alpha_threshold,
-        ),
-    )
-
     # Stage 1: in-memory scene understanding.  Debug serialization lives under
     # output/debug only; normal mode avoids extra Stage-1 artifacts.
     scene_result = understand_scene(
@@ -155,6 +146,32 @@ def main() -> None:
         with open(debug_dir / "stage1_scene_profile.json", "w", encoding="utf-8") as f:
             json.dump(to_jsonable(scene_result.profile), f, indent=2)
 
+    # Resolve z-near from captured trajectory scale after Stage 1 establishes
+    # center/up. Load and split Gaussian tensors once for Stage 2 and Stage 3.
+    frame = scene_result.profile.coordinate_frame
+    near_plane = resolve_renderer_near_plane(
+        cameras, scene_result.profile.center_fit.center, frame.y_axis,
+        pose_cfg.renderer_near_plane,
+    )
+    renderer = GsplatRenderer(
+        args.gaussian_ply,
+        config=GaussianRendererConfig(
+            near_plane=near_plane,
+            skybox=pose_cfg.skybox,
+        ),
+        device=args.device,
+    )
+    depth_probe = GsplatDepthProbe(
+        renderer=renderer,
+        config=DepthProbeConfig(
+            strategy=args.depth_strategy,
+            max_image_dim=args.probe_max_dim,
+            central_crop_ratio=args.probe_crop_ratio,
+            depth_quantile=args.probe_quantile,
+            alpha_threshold=args.probe_alpha_threshold,
+        ),
+    )
+
     # Stage 2: all geometry-safe grid candidates + endpoint view_limits.
     pose_result = generate_candidate_poses(
         captured_cameras=cameras,
@@ -163,11 +180,22 @@ def main() -> None:
         depth_probe=depth_probe,
         config=pose_cfg,
     )
+    pose_result.renderer_metadata = {
+        "near_plane": near_plane,
+        "near_plane_strategy": pose_cfg.renderer_near_plane.strategy,
+        "skybox": renderer.skybox_metadata,
+    }
+    pose_result.diagnostics.update({
+        "renderer_near_plane": near_plane,
+        "skybox_gaussian_count": renderer.skybox_metadata["skybox_gaussians"],
+        "geometry_gaussian_count": renderer.skybox_metadata["geometry_gaussians"],
+        "skybox_fraction": renderer.skybox_metadata["skybox_fraction"],
+        "skybox_detection_confidence": renderer.skybox_metadata["detection_confidence"],
+    })
     stage2_paths = save_pose_generation_result(pose_result, str(output))
 
     # Stage 3: geometric-hole mandatory views + final selection + references + RGB.
     stage2_candidates = candidates_from_pose_result(pose_result)
-    frame = scene_result.profile.coordinate_frame
     stage3_result, stage3_paths = run_stage3(
         captured_cameras=cameras,
         stage2_candidates=stage2_candidates,
@@ -187,6 +215,9 @@ def main() -> None:
     print("=" * 80)
     print(f"Stage 1 mode        : {pose_result.mode.mode.value}")
     print(f"Stage 2 valid views : {len(stage2_candidates)}")
+    print(f"Crossing capped     : {pose_result.diagnostics.get('inside_out_crossing_radius_capped_count', 0)}")
+    print(f"Crossing fallback   : {pose_result.diagnostics.get('inside_out_crossing_fallback_initial_count', 0)}")
+    print(f"GS geometry/skybox  : {len(renderer.geometry_means_np)} / {len(renderer.skybox_means_np)}")
     print(f"Stage 3 panos       : {len(stage3_result.selected_cameras)} / {stage3_cfg.num_panos}")
     print(f"Stage 3 refs        : {len(stage3_result.reference_result.original_indices)} / {stage3_cfg.num_refs}")
     print("-- Stage 2 --")

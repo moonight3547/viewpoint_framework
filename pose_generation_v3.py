@@ -92,7 +92,7 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
         strategy = (config.outside_placement_strategy if mode_result.mode == CameraMode.OUTSIDE_IN
                     else config.inside_placement_strategy)
         meta = {
-            "version": "3.0", "elevation_semantics": "position",
+            "version": "3.1", "elevation_semantics": "position",
             "grid_azimuth_deg": point.azimuth_deg, "grid_elevation_deg": point.elevation_deg,
             "trajectory_branch_id": interval.branch_id if interval else None,
             "horizontal_safe_intervals": to_jsonable(estimate.intervals),
@@ -101,10 +101,18 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
             "local_clearance_threshold": None, "proposal_safe": None,
             "height_guard_enabled": config.height_guard.enabled, "height_guard_pass": None,
             "adjustment_radius_max": radius_max, "adjustment_radius_exceeded": False,
+            "radius_max_applied": False, "crossing_radius_capped": False,
+            "crossing_failed_fallback_initial": False, "adjustment_type": "none",
             "initial_radius_exceeds_adjustment_max": False,
             "adjustment_attempted": False, "adjustment_applied": False,
             "adjustment_distance": 0.0, "adjustment_skip_reason": None,
             "proposed_signed_radius": None, "final_geometry_safe": False,
+            "grid_direction": None, "position_direction": None,
+            "position_azimuth_deg": None, "position_elevation_deg": None,
+            "camera_forward": None, "fps_direction": None,
+            "fps_direction_semantics": "final_position_radial",
+            "inside_out_forward_semantics": "preserve_original_grid_direction",
+            "depth_probe_excludes_skybox": True,
         }
         candidate = GeneratedCandidate(
             grid_id=point.grid_id, row=point.row, col=point.col,
@@ -132,6 +140,7 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
         candidate.initial_radius = r0
         candidate.final_signed_radius = r0
         meta["initial_position"] = initial.tolist()
+        meta["grid_direction"] = direction.tolist()
         meta["initial_radius_exceeds_adjustment_max"] = r0 > radius_max
         threshold = local_clearance_threshold(interval.rho_preferred, trajectory.median_captured_rho, config.geometry)
         meta["local_clearance_threshold"] = threshold
@@ -147,7 +156,12 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
             continue
 
         final, signed = initial.copy(), r0
-        if strategy != "prior_only" and r0 <= radius_max:
+        crossing_attempted = False
+        adjustment_allowed = (
+            strategy != "prior_only"
+            and (mode_result.mode == CameraMode.INSIDE_OUT or r0 <= radius_max)
+        )
+        if adjustment_allowed:
             meta["adjustment_attempted"] = True
             probe_forward = direction if mode_result.mode == CameraMode.OUTSIDE_IN else -direction
             probe_camera = build_generated_camera(-1, initial, probe_forward, captured_cameras, profile, config)
@@ -167,33 +181,74 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
                     config.depth_margin_ratio, config.center_cross_extra_ratio,
                 )
                 meta["proposed_signed_radius"] = proposed
-                if not np.isfinite(proposed) or abs(proposed) > radius_max:
+                if not np.isfinite(proposed):
                     meta["adjustment_radius_exceeded"] = True
-                    meta["adjustment_skip_reason"] = "ADJUSTMENT_EXCEEDS_RADIUS_MAX"
+                    meta["adjustment_skip_reason"] = "INVALID_ADJUSTMENT_RADIUS"
                 else:
-                    final = center + proposed * direction
-                    if config.use_path_safety:
+                    effective = float(proposed)
+                    if mode_result.mode == CameraMode.OUTSIDE_IN and effective > radius_max:
+                        meta["adjustment_radius_exceeded"] = True
+                        meta["radius_max_applied"] = True
+                        meta["adjustment_skip_reason"] = "ADJUSTMENT_EXCEEDS_RADIUS_MAX"
+                        effective = r0
+                    elif mode_result.mode == CameraMode.INSIDE_OUT and effective < 0:
+                        crossing_attempted = True
+                        meta["adjustment_type"] = "inside_out_crossing"
+                        if abs(effective) > radius_max:
+                            # Crossing itself is an inward move through the center.
+                            # Only the expansion on the opposite side is capped.
+                            effective = -radius_max
+                            meta["adjustment_radius_exceeded"] = True
+                            meta["radius_max_applied"] = True
+                            meta["crossing_radius_capped"] = True
+                    elif mode_result.mode == CameraMode.INSIDE_OUT:
+                        meta["adjustment_type"] = "inside_out_same_side_inward"
+                    elif effective != r0:
+                        meta["adjustment_type"] = "outside_in_outward"
+
+                    final = center + effective * direction
+                    # Crossing always validates the complete center-spanning path;
+                    # the general path-safety switch only controls non-crossing moves.
+                    if config.use_path_safety or crossing_attempted:
                         path = safety.safe_path_fraction(initial, final, threshold)
                         candidate.path_safe_fraction = path.safe_fraction
-                        final = initial + path.safe_fraction * (final - initial)
+                        if crossing_attempted and path.safe_fraction < 1.0 - 1e-9:
+                            final = initial.copy()
+                            meta["crossing_failed_fallback_initial"] = True
+                            meta["adjustment_skip_reason"] = "CROSSING_PATH_UNSAFE_FALLBACK_INITIAL"
+                        else:
+                            final = initial + path.safe_fraction * (final - initial)
                     signed = float(np.dot(final - center, direction))
                     # Keep V2's lower shell intent, but never clip a checked point
                     # into an unchecked location (especially near the center).
-                    if abs(signed) < min(r0, max(radius_min, EPS)):
+                    if not crossing_attempted and abs(signed) < min(r0, max(radius_min, EPS)):
                         final, signed = initial.copy(), r0
                         meta["adjustment_skip_reason"] = "PATH_CLIPPED_BELOW_MIN_RADIUS"
         elif strategy != "prior_only":
             meta["adjustment_skip_reason"] = "INITIAL_EXCEEDS_ADJUSTMENT_RADIUS_MAX"
-
         candidate.final_signed_radius = signed
         candidate.crossed_center = signed < 0
         meta["final_position"] = final.tolist()
         meta["adjustment_distance"] = float(np.linalg.norm(final - initial))
         meta["adjustment_applied"] = meta["adjustment_distance"] > EPS
+        final_safe, candidate.final_clearance = safety.is_position_safe(final, threshold)
+        if crossing_attempted and not final_safe:
+            final, signed = initial.copy(), r0
+            candidate.final_signed_radius = signed
+            candidate.crossed_center = False
+            meta["final_position"] = final.tolist()
+            meta["adjustment_distance"] = 0.0
+            meta["adjustment_applied"] = False
+            meta["crossing_failed_fallback_initial"] = True
+            meta["adjustment_skip_reason"] = "CROSSING_FINAL_UNSAFE_FALLBACK_INITIAL"
+            final_safe, candidate.final_clearance = safety.is_position_safe(final, threshold)
+        candidate.final_signed_radius = signed
+        candidate.crossed_center = signed < 0
+        meta["crossed_center"] = candidate.crossed_center
+        meta["final_signed_radius"] = signed
         meta["position_height"] = float(np.dot(final - center, frame.y_axis))
         height_ok = config.height_guard.allows(meta["position_height"], interval) if config.height_guard.enabled else None
         meta["height_guard_pass"] = height_ok
-        final_safe, candidate.final_clearance = safety.is_position_safe(final, threshold)
         meta["final_geometry_safe"] = bool(final_safe and np.isfinite(candidate.final_clearance))
         if height_ok is False:
             candidate.reject_reason = "HEIGHT_OUT_OF_TRAJECTORY_RANGE"
@@ -207,7 +262,7 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
             candidate.reject_reason = "INVALID_VIEW_ORIENTATION"
             continue
         radial /= length
-        forward = -radial if mode_result.mode == CameraMode.OUTSIDE_IN else radial
+        forward = -radial if mode_result.mode == CameraMode.OUTSIDE_IN else direction
         camera = build_generated_camera(len(cameras), final, forward, captured_cameras, profile, config)
         if not np.isfinite(camera.c2w).all():
             candidate.reject_reason = "INVALID_VIEW_ORIENTATION"
@@ -216,14 +271,24 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
         # actual radial direction, retaining the original grid identity in meta.
         candidate.direction = radial
         candidate.azimuth_deg, candidate.elevation_deg = direction_to_azimuth_elevation(radial, frame)
+        meta["position_direction"] = radial.tolist()
+        meta["position_azimuth_deg"] = candidate.azimuth_deg
         meta["position_elevation_deg"] = candidate.elevation_deg
+        meta["camera_forward"] = forward.tolist()
+        meta["fps_direction"] = radial.tolist()
+        renderer = getattr(depth_probe, "renderer", None)
+        if renderer is not None:
+            meta["renderer_near_plane"] = float(renderer.config.near_plane)
+            skybox_margin = float(renderer.skybox_radius * renderer.config.skybox.radial_band_ratio)
+            if len(getattr(renderer, "skybox_means_np", ())) and not renderer.camera_inside_skybox(camera, skybox_margin):
+                candidate.notes.append("CAMERA_OUTSIDE_SKYBOX")
         candidate.camera = camera
         candidate.status = CandidateStatus.VALID
         cameras.append(camera)
 
     reasons = Counter(c.reject_reason for c in candidates if c.reject_reason)
     diagnostics = {
-        "version": "3.0", "elevation_semantics": "position", "angular_grid_count": len(grid),
+        "version": "3.1", "elevation_semantics": "position", "angular_grid_count": len(grid),
         "trajectory_branch_count": trajectory.branch_count,
         "trajectory_jump_rejected_count": trajectory.jump_rejected_count,
         "trajectory_invalid_pose_count": trajectory.invalid_pose_count,
@@ -238,9 +303,21 @@ def generate_v3_candidates(captured_cameras, profile, bbox, view_limits, grid,
         "depth_probe_failed_count": sum(c.depth_probe is not None and not c.depth_probe.valid for c in candidates),
         "adjustment_radius_exceeded_count": sum(c.geometry_metadata["adjustment_radius_exceeded"] for c in candidates),
         "adjustment_applied_count": sum(c.geometry_metadata["adjustment_applied"] for c in candidates),
+        "inside_out_count": sum(c.mode == CameraMode.INSIDE_OUT for c in candidates),
+        "inside_out_crossing_count": sum(c.mode == CameraMode.INSIDE_OUT and c.crossed_center for c in candidates),
+        "inside_out_same_side_adjustment_count": sum(c.geometry_metadata["adjustment_type"] == "inside_out_same_side_inward" and c.geometry_metadata["adjustment_applied"] for c in candidates),
+        "inside_out_initial_over_radius_max_count": sum(c.mode == CameraMode.INSIDE_OUT and c.geometry_metadata["initial_radius_exceeds_adjustment_max"] for c in candidates),
+        "inside_out_over_radius_max_adjusted_count": sum(c.mode == CameraMode.INSIDE_OUT and c.geometry_metadata["initial_radius_exceeds_adjustment_max"] and c.geometry_metadata["adjustment_applied"] for c in candidates),
+        "inside_out_crossing_radius_capped_count": sum(c.geometry_metadata["crossing_radius_capped"] for c in candidates),
+        "inside_out_crossing_fallback_initial_count": sum(c.geometry_metadata["crossing_failed_fallback_initial"] for c in candidates),
+        "depth_probe_skybox_excluded_count": sum(c.depth_probe is not None for c in candidates),
+        "camera_outside_skybox_count": sum("CAMERA_OUTSIDE_SKYBOX" in c.notes for c in candidates),
         "final_geometry_rejected_count": reasons["FINAL_POSITION_TOO_CLOSE_TO_GEOMETRY"],
         "valid_candidate_count": len(cameras), "rejection_reasons": dict(reasons),
     }
+    if diagnostics["inside_out_crossing_fallback_initial_count"]:
+        print("[S2:V3.1_WARNING] inside-out crossing failed safety validation; "
+              f"fell back to safe initial position for {diagnostics['inside_out_crossing_fallback_initial_count']} candidate(s).")
     if config.console_log_candidates:
         for c in candidates:
             m = c.geometry_metadata

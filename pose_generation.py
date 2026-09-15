@@ -38,6 +38,8 @@ from viewpoint_framework.gs_depth_probe import (
     DepthProbeResult,
     NullDepthProbe,
 )
+from viewpoint_framework.gs_renderer import RendererNearPlaneConfig
+from viewpoint_framework.skybox_detection import SkyboxDetectionConfig
 from viewpoint_framework.scene_types import (
     CameraMode,
     CameraSceneRelation,
@@ -71,6 +73,8 @@ class CandidateStatus(str, Enum):
 @dataclass
 class PoseGenerationConfig:
     """Compact configuration with strategy hooks for later ablations."""
+
+    version: str = "2.0"
 
     # Default observation mode.
     mode_strategy: str = "count_majority"     # count_majority | weighted_majority | legacy_majority | binary_count_majority | forced
@@ -125,6 +129,8 @@ class PoseGenerationConfig:
     trajectory_safe_field: TrajectorySafeFieldConfig = field(default_factory=TrajectorySafeFieldConfig)
     height_guard: HeightGuardConfig = field(default_factory=HeightGuardConfig)
     adjustment_radius_max: Optional[float] = None  # None -> V2 generation bbox max (3D)
+    skybox: SkyboxDetectionConfig = field(default_factory=SkyboxDetectionConfig)
+    renderer_near_plane: RendererNearPlaneConfig = field(default_factory=RendererNearPlaneConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
@@ -132,10 +138,14 @@ class PoseGenerationConfig:
         geometry_data = payload.pop("geometry", {})
         trajectory_data = payload.pop("trajectory_safe_field", {})
         height_data = payload.pop("height_guard", {})
+        skybox_data = payload.pop("skybox", {})
+        near_plane_data = payload.pop("renderer_near_plane", {})
         cfg = cls(**payload)
         cfg.geometry = GeometrySafetyConfig(**geometry_data)
         cfg.trajectory_safe_field = TrajectorySafeFieldConfig(**trajectory_data)
         cfg.height_guard = HeightGuardConfig(**height_data)
+        cfg.skybox = SkyboxDetectionConfig(**skybox_data)
+        cfg.renderer_near_plane = RendererNearPlaneConfig(**near_plane_data)
         return cfg
 
 
@@ -196,6 +206,7 @@ class PoseGenerationResult:
     valid_cameras: List[Camera]
     config: PoseGenerationConfig
     diagnostics: Dict[str, Any] = field(default_factory=dict)
+    renderer_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -1385,6 +1396,8 @@ def save_pose_generation_result(
         "num_valid": len(result.valid_cameras),
         "num_rejected": len(result.candidates) - len(result.valid_cameras),
         "diagnostics": to_jsonable(result.diagnostics),
+        "renderer": to_jsonable(result.renderer_metadata),
+        "skybox": to_jsonable(result.renderer_metadata.get("skybox", {})),
         "candidates": to_jsonable(result.candidates),
     }
     with open(meta_path, "w", encoding="utf-8") as f:

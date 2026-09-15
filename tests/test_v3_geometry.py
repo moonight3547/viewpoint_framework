@@ -153,15 +153,24 @@ def test_unsafe_initial_is_rejected_before_depth():
     assert candidate.geometry_metadata["adjustment_attempted"] is False
 
 
-@pytest.mark.parametrize("mode", [CameraMode.OUTSIDE_IN, CameraMode.INSIDE_OUT])
-def test_depth_exceeding_upper_radius_keeps_exact_prior(mode):
-    result = run_case(mode=mode, depth=_DepthProbe(100.))
+def test_outside_depth_exceeding_upper_radius_keeps_exact_prior():
+    result = run_case(mode=CameraMode.OUTSIDE_IN, depth=_DepthProbe(100.))
     c = result.candidates[0]
     assert c.final_signed_radius == pytest.approx(c.initial_radius)
     assert c.geometry_metadata["adjustment_radius_exceeded"]
     assert c.geometry_metadata["adjustment_skip_reason"] == "ADJUSTMENT_EXCEEDS_RADIUS_MAX"
     assert c.geometry_metadata["final_geometry_safe"]
     np.testing.assert_allclose(c.geometry_metadata["initial_position"], c.camera.position)
+
+
+def test_inside_crossing_is_capped_on_opposite_side_not_rejected():
+    cfg = config_v3()
+    cfg.adjustment_radius_max = 3.0
+    c = run_case(mode=CameraMode.INSIDE_OUT, depth=_DepthProbe(100.), cfg=cfg).candidates[0]
+    assert c.crossed_center
+    assert c.final_signed_radius == pytest.approx(-3.0)
+    assert c.geometry_metadata["crossing_radius_capped"]
+    assert c.geometry_metadata["radius_max_applied"]
 
 
 def test_explicit_radius_cap_allows_or_skips_identical_proposal():
@@ -184,7 +193,7 @@ def test_prior_is_not_clipped_to_global_upper_bound():
     assert c.geometry_metadata["initial_radius_exceeds_adjustment_max"]
 
 
-def test_inside_crossing_passes_actual_3d_center_and_points_outward():
+def test_inside_crossing_passes_actual_3d_center_and_preserves_grid_forward():
     result = run_case(mode=CameraMode.INSIDE_OUT, elevation=30., depth=_DepthProbe(3.5))
     c = result.candidates[0]
     center = np.asarray(result.view_limits["target"])
@@ -193,8 +202,8 @@ def test_inside_crossing_passes_actual_3d_center_and_points_outward():
     assert c.crossed_center
     assert start[1] > 0 and end[1] < 0  # no constant-height crossing
     np.testing.assert_allclose(np.cross(start, end), np.zeros(3), atol=1e-12)
-    np.testing.assert_allclose(c.camera.forward, end / np.linalg.norm(end))
-    assert np.dot(c.camera.forward, center - c.camera.position) < 0
+    np.testing.assert_allclose(c.camera.forward, start / np.linalg.norm(start))
+    assert np.dot(c.camera.forward, end / np.linalg.norm(end)) == pytest.approx(-1.)
     assert c.elevation_deg == pytest.approx(-30.)
     assert c.geometry_metadata["grid_elevation_deg"] == 30.
 
@@ -325,7 +334,8 @@ def test_v3_metadata_and_stage3_adapters(tmp_path):
     assert mode == CameraMode.INSIDE_OUT
     assert len(from_file) == len(from_memory) == 1
     np.testing.assert_allclose(from_file[0].camera.forward, from_memory[0].camera.forward)
-    np.testing.assert_allclose(from_file[0].observation_direction, from_file[0].camera.forward)
+    np.testing.assert_allclose(from_file[0].observation_direction, from_memory[0].observation_direction)
+    assert np.dot(from_file[0].observation_direction, from_file[0].camera.forward) == pytest.approx(-1.)
     meta = json.loads(Path(paths["gen_cameras_meta"]).read_text())
     assert meta["candidates"][0]["geometry_metadata"]["final_geometry_safe"]
     assert meta["diagnostics"]["initial_geometry_unsafe_count"] == 0
@@ -342,3 +352,28 @@ def test_v2_json_config_still_clamps_far_depth_to_global_max():
     c = result.candidates[0]
     assert c.final_signed_radius == pytest.approx(max(result.bbox.generation_radius))
     assert c.geometry_metadata == {}
+
+
+def test_inside_same_side_inward_runs_when_initial_exceeds_radius_max():
+    cfg = config_v3()
+    cfg.adjustment_radius_max = 1.2
+    c = run_case(mode=CameraMode.INSIDE_OUT, depth=_DepthProbe(0.5), cfg=cfg).candidates[0]
+    assert c.initial_radius > cfg.adjustment_radius_max
+    assert c.depth_probe is not None
+    assert 0 < c.final_signed_radius < c.initial_radius
+    assert c.geometry_metadata["adjustment_type"] == "inside_out_same_side_inward"
+
+
+def test_unsafe_capped_crossing_falls_back_to_safe_initial():
+    cfg = config_v3()
+    cfg.adjustment_radius_max = 1.0
+    cfg.use_path_safety = False  # crossing safety remains mandatory in V3.1
+    center_obstacle = np.tile([4., 7., -2.], (3, 1))
+    c = run_case(
+        mode=CameraMode.INSIDE_OUT, depth=_DepthProbe(100.),
+        points=center_obstacle, cfg=cfg,
+    ).candidates[0]
+    assert c.camera is not None
+    assert not c.crossed_center
+    assert c.final_signed_radius == pytest.approx(c.initial_radius)
+    assert c.geometry_metadata["crossing_failed_fallback_initial"]
