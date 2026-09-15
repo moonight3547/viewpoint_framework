@@ -48,6 +48,11 @@ class GeometrySafetyConfig:
     path_step_ratio: float = 0.50  # sample step = clearance * this ratio
     max_path_samples: int = 96
     path_backoff_ratio: float = 0.75
+    # V3 explicitly passes a local threshold; omitted thresholds retain V1/V2.
+    clearance_strategy: str = "pointcloud_aabb"
+    local_clearance_ratio: float = 0.05
+    local_clearance_min_ratio: float = 0.01
+    local_clearance_max_ratio: float = 0.10
 
 
 @dataclass
@@ -56,6 +61,23 @@ class PathSafetyResult:
     fully_safe: bool
     min_clearance: float
     num_samples: int
+
+
+def local_clearance_threshold(
+    rho: float, median_captured_rho: float, config: GeometrySafetyConfig,
+) -> float:
+    """V3 distance threshold in trajectory units, independent of point extent."""
+    values = (rho, median_captured_rho, config.local_clearance_ratio,
+              config.local_clearance_min_ratio, config.local_clearance_max_ratio)
+    if not all(np.isfinite(v) and v > 0 for v in values):
+        raise ValueError("Local clearance radii and ratios must be finite and positive.")
+    if config.local_clearance_min_ratio > config.local_clearance_max_ratio:
+        raise ValueError("Local clearance minimum must not exceed maximum.")
+    return float(np.clip(
+        config.local_clearance_ratio * rho,
+        config.local_clearance_min_ratio * median_captured_rho,
+        config.local_clearance_max_ratio * median_captured_rho,
+    ))
 
 
 class PointCloudSafety:
@@ -82,10 +104,17 @@ class PointCloudSafety:
         if self.scene_diagonal <= EPS:
             self.scene_diagonal = 1.0
 
-        self.clearance = max(
-            float(self.config.clearance_abs),
-            float(self.config.clearance_ratio) * self.scene_diagonal,
-        )
+        if self.config.clearance_strategy == "pointcloud_aabb":
+            self.clearance = max(
+                float(self.config.clearance_abs),
+                float(self.config.clearance_ratio) * self.scene_diagonal,
+            )
+        elif self.config.clearance_strategy == "local_horizontal_radius":
+            if not np.isfinite(self.points).all():
+                raise ValueError("V3 safety requires finite point-cloud coordinates.")
+            self.clearance = None  # Require an explicit per-candidate threshold.
+        else:
+            raise ValueError(f"Unknown clearance strategy: {self.config.clearance_strategy}")
 
         self._tree = None
         if self.config.strategy == "pointcloud_knn":
@@ -110,14 +139,26 @@ class PointCloudSafety:
         distances = np.sqrt(np.asarray(dist2[:count], dtype=np.float64))
         return float(np.median(distances))
 
-    def is_position_safe(self, position: np.ndarray) -> Tuple[bool, float]:
+    def _required_clearance(self, required_clearance: Optional[float]) -> float:
+        value = self.clearance if required_clearance is None else required_clearance
+        if value is None or not np.isfinite(value) or value <= 0:
+            raise ValueError("A finite, positive required_clearance is required.")
+        return float(value)
+
+    def is_position_safe(
+        self, position: np.ndarray, required_clearance: Optional[float] = None,
+    ) -> Tuple[bool, float]:
+        threshold = self._required_clearance(required_clearance)
+        if required_clearance is not None and not np.isfinite(position).all():
+            return False, 0.0
         distance = self.point_clearance(position)
-        return bool(distance >= self.clearance), distance
+        return bool(distance >= threshold), distance
 
     def safe_path_fraction(
         self,
         start: np.ndarray,
         end: np.ndarray,
+        required_clearance: Optional[float] = None,
     ) -> PathSafetyResult:
         """Return the farthest contiguous safe fraction on ``start -> end``.
 
@@ -131,9 +172,11 @@ class PointCloudSafety:
         if self.config.strategy == "none":
             return PathSafetyResult(1.0, True, float("inf"), 2)
 
+        threshold = self._required_clearance(required_clearance)
+
         length = float(np.linalg.norm(end - start))
         if length <= EPS:
-            safe, distance = self.is_position_safe(start)
+            safe, distance = self.is_position_safe(start, required_clearance)
             return PathSafetyResult(
                 safe_fraction=1.0 if safe else 0.0,
                 fully_safe=safe,
@@ -141,7 +184,7 @@ class PointCloudSafety:
                 num_samples=1,
             )
 
-        step = max(self.clearance * float(self.config.path_step_ratio), 1e-6)
+        step = max(threshold * float(self.config.path_step_ratio), 1e-6)
         n = int(np.ceil(length / step)) + 1
         n = max(2, min(n, int(self.config.max_path_samples)))
         ts = np.linspace(0.0, 1.0, n, dtype=np.float64)
@@ -154,7 +197,7 @@ class PointCloudSafety:
             distance = self.point_clearance(position)
             min_clearance = min(min_clearance, distance)
 
-            if distance < self.clearance:
+            if distance < threshold:
                 if sample_index == 0:
                     return PathSafetyResult(0.0, False, min_clearance, n)
 

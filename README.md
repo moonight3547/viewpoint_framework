@@ -1,5 +1,8 @@
 # Viewpoint Framework
 
+V3.0 的几何安全增量、配置与运行示例见 [README_V3.md](README_V3.md)。
+使用 `configs/v2_scene_understanding.json` + `configs/v3_pose_generation.json` 启用。
+
 面向 3D 场景重建的**视角约束、视角生成与相机位姿可视化框架**。
 
 当前版本首先完成基础数据协议与交互式可视化能力：

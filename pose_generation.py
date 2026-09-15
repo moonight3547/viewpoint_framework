@@ -47,6 +47,10 @@ from viewpoint_framework.scene_types import (
     to_jsonable,
 )
 from viewpoint_framework.scene_understanding import SceneUnderstandingResult
+from viewpoint_framework.trajectory_safe_field import (
+    HeightGuardConfig,
+    TrajectorySafeFieldConfig,
+)
 from viewpoint_framework.view_space import (
     azimuth_elevation_to_direction,
     direction_to_azimuth_elevation,
@@ -116,12 +120,22 @@ class PoseGenerationConfig:
     # Compact V2 diagnostics: one grid point or candidate per console line.
     console_log_candidates: bool = False
 
+    # Opt-in V3.0: elevation still controls position; no independent view pitch.
+    position_strategy: str = "legacy"  # legacy | trajectory_safe_field
+    trajectory_safe_field: TrajectorySafeFieldConfig = field(default_factory=TrajectorySafeFieldConfig)
+    height_guard: HeightGuardConfig = field(default_factory=HeightGuardConfig)
+    adjustment_radius_max: Optional[float] = None  # None -> V2 generation bbox max (3D)
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
         payload = dict(data)
         geometry_data = payload.pop("geometry", {})
+        trajectory_data = payload.pop("trajectory_safe_field", {})
+        height_data = payload.pop("height_guard", {})
         cfg = cls(**payload)
         cfg.geometry = GeometrySafetyConfig(**geometry_data)
+        cfg.trajectory_safe_field = TrajectorySafeFieldConfig(**trajectory_data)
+        cfg.height_guard = HeightGuardConfig(**height_data)
         return cfg
 
 
@@ -170,6 +184,7 @@ class GeneratedCandidate:
     status: CandidateStatus
     reject_reason: Optional[str] = None
     notes: List[str] = field(default_factory=list)
+    geometry_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1065,6 +1080,8 @@ def generate_candidate_poses(
     config: Optional[PoseGenerationConfig] = None,
 ) -> PoseGenerationResult:
     config = config or PoseGenerationConfig()
+    if config.position_strategy not in ("legacy", "trajectory_safe_field"):
+        raise ValueError(f"Unknown position_strategy: {config.position_strategy}")
     profile = scene_result.profile
     depth_probe = depth_probe or NullDepthProbe()
 
@@ -1096,6 +1113,14 @@ def generate_candidate_poses(
         profile, bbox, config, dominant_relations=dominant_relations
     )
     grid = generate_angular_grid(profile, bbox, config)
+
+    if config.position_strategy == "trajectory_safe_field":
+        # Separate orchestration keeps V1/V2 placement and clipping unchanged.
+        from viewpoint_framework.pose_generation_v3 import generate_v3_candidates
+        return generate_v3_candidates(
+            captured_cameras, profile, bbox, view_limits, grid, mode_result,
+            point_cloud_points, depth_probe, config,
+        )
 
     if config.console_log_candidates:
         az_rows: Dict[int, int] = {}
