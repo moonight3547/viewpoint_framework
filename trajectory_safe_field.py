@@ -24,6 +24,9 @@ class TrajectorySafeFieldConfig:
     max_angular_gap_deg: float = 30.0
     tube_radius_ratio: float = 0.04
     unsupported_behavior: str = "nearest_limited"  # nearest_limited | reject
+    rho_strategy: str = "v3_1"  # v3_1 | segment_ray_min
+    fallback_strategy: str = "v3_1"
+    fallback_confidence_threshold: float = 0.2
 
     def validate(self) -> None:
         for name in ("max_step_multiplier", "resample_step_ratio",
@@ -37,6 +40,12 @@ class TrajectorySafeFieldConfig:
             raise ValueError("tube_radius_ratio must be < 1.")
         if self.unsupported_behavior not in ("nearest_limited", "reject"):
             raise ValueError("Unsupported trajectory fallback policy.")
+        if self.rho_strategy not in ("v3_1", "segment_ray_min"):
+            raise ValueError("Unsupported trajectory rho strategy.")
+        if self.fallback_strategy != "v3_1":
+            raise ValueError("Only the V3.1 trajectory fallback is supported.")
+        if not 0.0 <= self.fallback_confidence_threshold <= 1.0:
+            raise ValueError("fallback_confidence_threshold must be in [0,1].")
 
 
 @dataclass
@@ -75,6 +84,24 @@ class TrajectorySafeEstimate:
     nearest_support_angle_deg: Optional[float] = None
 
 
+@dataclass
+class AzimuthTrajectorySupport:
+    azimuth_deg: float
+    rho: Optional[float]
+    rho_source: str
+    direct_intersection_count: int
+    selected_segment_start_index: Optional[int]
+    selected_segment_end_index: Optional[int]
+    selected_segment_t: Optional[float]
+    trajectory_cross_height: Optional[float]
+    trajectory_height_min: Optional[float]
+    trajectory_height_max: Optional[float]
+    fallback_confidence: Optional[float]
+    fallback_low_confidence: bool = False
+    branch_id: Optional[int] = None
+    nearest_support_angle_deg: Optional[float] = None
+
+
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     order = np.argsort(values, kind="stable")
     cumulative = np.cumsum(weights[order])
@@ -104,6 +131,12 @@ class TrajectorySafeField:
         jumps = good_edges & (steps > self.config.max_step_multiplier * self.typical_step)
         linked = good_edges & ~jumps
         self.jump_rejected_count = int(jumps.sum())
+        self.center = center
+        self.basis = basis
+        self.positions = positions
+        self.finite_camera_mask = finite
+        self.linked_edges = linked
+        self.camera_indices = [int(c.index) for c in cameras]
 
         # Invalid poses break the sequence; filtering them out must not bridge gaps.
         branch_ids = np.full(len(cameras), -1, dtype=int)
@@ -148,6 +181,7 @@ class TrajectorySafeField:
         original_rhos = np.hypot(local_original[:, 0], local_original[:, 2])
         original_rhos = original_rhos[original_rhos > EPS]
         self.median_captured_rho = float(np.median(original_rhos)) if len(original_rhos) else 0.0
+        self.captured_heights = local_original[:, 1].copy()
 
     def query(self, azimuth_deg: float) -> TrajectorySafeEstimate:
         if not np.isfinite(azimuth_deg):
@@ -199,3 +233,80 @@ class TrajectorySafeField:
         # Deterministic ties: original branch order, then smaller supported rho.
         best = max(intervals, key=lambda x: (x.confidence, -x.branch_id, -x.rho_preferred))
         return TrajectorySafeEstimate(az, intervals, best, best.confidence, source, nearest)
+
+    def query_segment_ray_min(self, azimuth_deg: float) -> AzimuthTrajectorySupport:
+        """Resolve V3.2 rho from continuous segment/ray intersections."""
+        if not np.isfinite(azimuth_deg):
+            raise ValueError("Azimuth must be finite.")
+        az = float((azimuth_deg + 180.0) % 360.0 - 180.0)
+        radians = np.radians(az)
+        ray = np.array([np.sin(radians), np.cos(radians)], dtype=np.float64)
+        local = (self.positions - self.center) @ self.basis
+        hits = []
+        for i, linked in enumerate(self.linked_edges):
+            if not linked:
+                continue
+            q0 = local[i, [0, 2]]
+            q1 = local[i + 1, [0, 2]]
+            delta = q1 - q0
+            matrix = np.column_stack((delta, -ray))
+            determinant = float(np.linalg.det(matrix))
+            scale = max(float(np.linalg.norm(delta)), 1.0)
+            if abs(determinant) <= EPS * scale:
+                continue
+            t, rho = np.linalg.solve(matrix, -q0)
+            if -1e-9 <= t <= 1.0 + 1e-9 and rho > EPS:
+                t = float(np.clip(t, 0.0, 1.0))
+                h0, h1 = float(local[i, 1]), float(local[i + 1, 1])
+                height = (1.0 - t) * h0 + t * h1
+                hits.append((float(rho), i, t, height, h0, h1))
+
+        if hits:
+            rho, i, t, height, h0, h1 = min(hits, key=lambda x: (x[0], x[1], x[2]))
+            return AzimuthTrajectorySupport(
+                azimuth_deg=az, rho=rho, rho_source="segment_ray_min",
+                direct_intersection_count=len(hits),
+                selected_segment_start_index=i,
+                selected_segment_end_index=i + 1,
+                selected_segment_t=t,
+                trajectory_cross_height=height,
+                trajectory_height_min=min(h0, h1, height),
+                trajectory_height_max=max(h0, h1, height),
+                fallback_confidence=None,
+            )
+
+        estimate = self.query(az)
+        intervals = list(estimate.intervals)
+        if not intervals:
+            return AzimuthTrajectorySupport(
+                azimuth_deg=az, rho=None, rho_source=estimate.source,
+                direct_intersection_count=0,
+                selected_segment_start_index=None, selected_segment_end_index=None,
+                selected_segment_t=None, trajectory_cross_height=None,
+                trajectory_height_min=None, trajectory_height_max=None,
+                fallback_confidence=estimate.confidence,
+                fallback_low_confidence=True,
+                nearest_support_angle_deg=estimate.nearest_support_angle_deg,
+            )
+        threshold = float(self.config.fallback_confidence_threshold)
+        qualified = [item for item in intervals if item.confidence >= threshold]
+        low_confidence = not bool(qualified)
+        if qualified:
+            selected = min(qualified, key=lambda x: (x.rho_preferred, x.branch_id))
+        else:
+            selected = min(intervals, key=lambda x: (-x.confidence, x.rho_preferred, x.branch_id))
+        return AzimuthTrajectorySupport(
+            azimuth_deg=az, rho=float(selected.rho_preferred),
+            rho_source=("trajectory_fallback_low_confidence" if low_confidence
+                        else "trajectory_fallback_v3_1"),
+            direct_intersection_count=0,
+            selected_segment_start_index=None, selected_segment_end_index=None,
+            selected_segment_t=None,
+            trajectory_cross_height=float(selected.height_preferred),
+            trajectory_height_min=float(selected.height_min),
+            trajectory_height_max=float(selected.height_max),
+            fallback_confidence=float(selected.confidence),
+            fallback_low_confidence=low_confidence,
+            branch_id=int(selected.branch_id),
+            nearest_support_angle_deg=estimate.nearest_support_angle_deg,
+        )

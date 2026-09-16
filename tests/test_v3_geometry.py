@@ -11,6 +11,8 @@ import viewpoint_framework.geometry_safety as safety_module
 from viewpoint_framework.geometry_safety import (
     GeometrySafetyConfig, PointCloudSafety, local_clearance_threshold,
 )
+from viewpoint_framework.gs_depth_probe import DepthProbeResult
+from viewpoint_framework.gs_renderer import GaussianRenderResult
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig, generate_candidate_poses, save_pose_generation_result,
 )
@@ -377,3 +379,68 @@ def test_unsafe_capped_crossing_falls_back_to_safe_initial():
     assert not c.crossed_center
     assert c.final_signed_radius == pytest.approx(c.initial_radius)
     assert c.geometry_metadata["crossing_failed_fallback_initial"]
+
+
+def test_v32_inside_crossing_reorients_away_from_final_center_position(tmp_path):
+    class GeometryRenderer:
+        config = SimpleNamespace(
+            near_plane=0.01,
+            skybox=SimpleNamespace(radial_band_ratio=0.005),
+        )
+        skybox_radius = 100.0
+        skybox_means_np = np.empty((0, 3))
+
+        def render_geometry_depth(self, camera, max_image_dim=None):
+            return GaussianRenderResult(
+                rgb=None, alpha=np.ones((8, 8), dtype=np.float32),
+                depth=np.full((8, 8), 3.0, dtype=np.float32),
+                width=8, height=8,
+            )
+
+        @staticmethod
+        def scaled_intrinsics(camera, width, height):
+            return np.array([[8.0, 0.0, 3.5], [0.0, 8.0, 3.5], [0.0, 0.0, 1.0]])
+
+        @staticmethod
+        def camera_inside_skybox(camera, margin):
+            return True
+
+    class Probe:
+        renderer = GeometryRenderer()
+
+        @staticmethod
+        def probe(camera):
+            return DepthProbeResult(
+                valid=True, depth=5.0, confidence=1.0, valid_pixels=64,
+                valid_ratio=1.0, depth_q10=5.0, depth_median=5.0,
+                depth_mean=5.0,
+            )
+
+    profile = _profile(CameraMode.INSIDE_OUT)
+    profile.view_bboxes[CameraMode.INSIDE_OUT.value].generation_elevation_deg = (30.0, 30.0)
+    cameras = [
+        _camera_at(0, [-0.2, -0.2, 1.0], [-0.2, -0.2, 1.0]),
+        _camera_at(1, [0.2, 0.2, 1.0], [0.2, 0.2, 1.0]),
+    ]
+    scene = SceneUnderstandingResult(
+        profile=profile, radius_fields={CameraMode.INSIDE_OUT.value: _Field(1.0)},
+    )
+    cfg = PoseGenerationConfig.from_dict(json.loads(
+        (ROOT / "configs/v3_2_pose_generation.json").read_text()
+    ))
+    cfg.mode_strategy = "count_majority"
+    cfg.bbox_strategy = "scene_profile"
+    cfg.view_limits_strategy = "generation_bbox"
+    result = generate_candidate_poses(cameras, scene, FAR_POINTS, Probe(), cfg)
+    candidate = result.candidates[0]
+    assert candidate.camera is not None and candidate.crossed_center
+    radial = candidate.camera.position - profile.center_fit.center
+    radial /= np.linalg.norm(radial)
+    np.testing.assert_allclose(candidate.camera.forward, radial, atol=1e-12)
+    assert candidate.geometry_metadata["inside_out_forward_semantics"] == "away_from_center_at_final_position"
+    assert result.placement_metadata["scene_center"] == [0.0, 0.0, 0.0]
+    paths = save_pose_generation_result(result, str(tmp_path))
+    metadata = json.loads(Path(paths["gen_cameras_meta"]).read_text())
+    assert metadata["trajectory_columns"][0]["rho_source"] == "segment_ray_min"
+    assert metadata["local_height_columns"][0]["upper_status"] == "LOCAL_RELIABLE"
+    assert metadata["global_height"]["height_min"] < metadata["global_height"]["height_max"]

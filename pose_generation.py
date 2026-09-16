@@ -39,6 +39,7 @@ from viewpoint_framework.gs_depth_probe import (
     NullDepthProbe,
 )
 from viewpoint_framework.gs_renderer import RendererNearPlaneConfig
+from viewpoint_framework.height_safety import GlobalHeightConfig, LocalHeightConfig
 from viewpoint_framework.skybox_detection import SkyboxDetectionConfig
 from viewpoint_framework.scene_types import (
     CameraMode,
@@ -131,6 +132,8 @@ class PoseGenerationConfig:
     adjustment_radius_max: Optional[float] = None  # None -> V2 generation bbox max (3D)
     skybox: SkyboxDetectionConfig = field(default_factory=SkyboxDetectionConfig)
     renderer_near_plane: RendererNearPlaneConfig = field(default_factory=RendererNearPlaneConfig)
+    local_height: LocalHeightConfig = field(default_factory=LocalHeightConfig)
+    global_height: GlobalHeightConfig = field(default_factory=GlobalHeightConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
@@ -140,12 +143,16 @@ class PoseGenerationConfig:
         height_data = payload.pop("height_guard", {})
         skybox_data = payload.pop("skybox", {})
         near_plane_data = payload.pop("renderer_near_plane", {})
+        local_height_data = payload.pop("local_height", {})
+        global_height_data = payload.pop("global_height", {})
         cfg = cls(**payload)
         cfg.geometry = GeometrySafetyConfig(**geometry_data)
         cfg.trajectory_safe_field = TrajectorySafeFieldConfig(**trajectory_data)
         cfg.height_guard = HeightGuardConfig(**height_data)
         cfg.skybox = SkyboxDetectionConfig(**skybox_data)
         cfg.renderer_near_plane = RendererNearPlaneConfig(**near_plane_data)
+        cfg.local_height = LocalHeightConfig(**local_height_data)
+        cfg.global_height = GlobalHeightConfig(**global_height_data)
         return cfg
 
 
@@ -207,6 +214,7 @@ class PoseGenerationResult:
     config: PoseGenerationConfig
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     renderer_metadata: Dict[str, Any] = field(default_factory=dict)
+    placement_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -1127,6 +1135,12 @@ def generate_candidate_poses(
 
     if config.position_strategy == "trajectory_safe_field":
         # Separate orchestration keeps V1/V2 placement and clipping unchanged.
+        if str(config.version).startswith("3.2"):
+            from viewpoint_framework.pose_generation_v32 import generate_v32_candidates
+            return generate_v32_candidates(
+                captured_cameras, profile, bbox, view_limits, grid, mode_result,
+                point_cloud_points, depth_probe, config,
+            )
         from viewpoint_framework.pose_generation_v3 import generate_v3_candidates
         return generate_v3_candidates(
             captured_cameras, profile, bbox, view_limits, grid, mode_result,
@@ -1398,6 +1412,10 @@ def save_pose_generation_result(
         "diagnostics": to_jsonable(result.diagnostics),
         "renderer": to_jsonable(result.renderer_metadata),
         "skybox": to_jsonable(result.renderer_metadata.get("skybox", {})),
+        "placement": to_jsonable(result.placement_metadata),
+        "trajectory_columns": to_jsonable(result.placement_metadata.get("trajectory_columns", [])),
+        "local_height_columns": to_jsonable(result.placement_metadata.get("local_height_columns", [])),
+        "global_height": to_jsonable(result.placement_metadata.get("global_height", {})),
         "candidates": to_jsonable(result.candidates),
     }
     with open(meta_path, "w", encoding="utf-8") as f:
