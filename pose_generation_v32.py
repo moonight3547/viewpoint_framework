@@ -57,6 +57,18 @@ def _height_source(limits):
     return f"lower:{limits.lower_source}|upper:{limits.upper_source}"
 
 
+def resolve_final_camera_forward(mode, radial_direction, grid_direction):
+    """Apply the collection semantics after radial placement.
+
+    Outside-in always faces scene center.  Inside-out preserves the sampled
+    grid direction: it faces away on the original side, and therefore faces
+    scene center after crossing to the opposite side.
+    """
+    radial = np.asarray(radial_direction, dtype=np.float64)
+    grid = np.asarray(grid_direction, dtype=np.float64)
+    return -radial if mode == CameraMode.OUTSIDE_IN else grid
+
+
 def generate_v32_candidates(captured_cameras, profile, bbox, view_limits, grid,
                             mode_result, point_cloud_points, depth_probe, config):
     renderer = _validate(config, point_cloud_points, depth_probe)
@@ -167,7 +179,7 @@ def generate_v32_candidates(captured_cameras, profile, bbox, view_limits, grid,
             "position_direction": None, "position_azimuth_deg": None,
             "position_elevation_deg": None, "camera_forward": None,
             "fps_direction": None, "fps_direction_semantics": "final_position_radial",
-            "inside_out_forward_semantics": "away_from_center_at_final_position",
+            "inside_out_forward_semantics": "preserve_grid_direction_crossing_faces_center",
             "depth_probe_excludes_skybox": True,
         }
         candidate = GeneratedCandidate(
@@ -364,9 +376,7 @@ def generate_v32_candidates(captured_cameras, profile, bbox, view_limits, grid,
             candidate.reject_reason = "INVALID_VIEW_ORIENTATION"
             continue
         radial /= length
-        # An inside-out camera which crosses the center flips with its final
-        # radial direction so it continues looking away from scene center.
-        forward = -radial if mode_result.mode == CameraMode.OUTSIDE_IN else radial
+        forward = resolve_final_camera_forward(mode_result.mode, radial, direction)
         camera = build_generated_camera(len(cameras), final, forward, captured_cameras, profile, config)
         candidate.direction = radial
         candidate.azimuth_deg, candidate.elevation_deg = direction_to_azimuth_elevation(radial, frame)

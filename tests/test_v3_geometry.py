@@ -381,7 +381,7 @@ def test_unsafe_capped_crossing_falls_back_to_safe_initial():
     assert c.geometry_metadata["crossing_failed_fallback_initial"]
 
 
-def test_v32_inside_crossing_reorients_away_from_final_center_position(tmp_path):
+def test_v32_inside_crossing_faces_center_from_opposite_side(tmp_path):
     class GeometryRenderer:
         config = SimpleNamespace(
             near_plane=0.01,
@@ -436,8 +436,9 @@ def test_v32_inside_crossing_reorients_away_from_final_center_position(tmp_path)
     assert candidate.camera is not None and candidate.crossed_center
     radial = candidate.camera.position - profile.center_fit.center
     radial /= np.linalg.norm(radial)
-    np.testing.assert_allclose(candidate.camera.forward, radial, atol=1e-12)
-    assert candidate.geometry_metadata["inside_out_forward_semantics"] == "away_from_center_at_final_position"
+    np.testing.assert_allclose(candidate.camera.forward, -radial, atol=1e-12)
+    assert np.dot(candidate.camera.forward, radial) == pytest.approx(-1.0)
+    assert candidate.geometry_metadata["inside_out_forward_semantics"] == "preserve_grid_direction_crossing_faces_center"
     assert result.placement_metadata["scene_center"] == [0.0, 0.0, 0.0]
     paths = save_pose_generation_result(result, str(tmp_path))
     metadata = json.loads(Path(paths["gen_cameras_meta"]).read_text())

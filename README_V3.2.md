@@ -136,7 +136,13 @@ Final 流程：
 6. final height 无法达到或 height-corrected final 碰撞时回退 corrected initial；
 7. crossing 全路径不安全或终点不安全时仍回退 corrected initial，并在 summary 中显式统计。
 
-V3.2 还修正了 inside-out crossing 的最终朝向：相机始终根据最终位置重新背离 scene center。也就是 `camera_forward = normalize(final_position - scene_center)`。V2/V3.1 的旧入口和旧行为没有改变。
+V3.2 的最终朝向严格区分三种运动语义：
+
+- outside-in 向外移动后仍面向 scene center：`camera_forward = -position_direction`；
+- inside-out non-crossing 向 scene center 移动，但保持背向 scene center：`camera_forward = grid_direction = position_direction`；
+- inside-out crossing 穿过中心并在对侧向外移动后，仍保持原始 `grid_direction`，此时 `grid_direction = -position_direction`，因此相机面向 scene center。
+
+也就是说，inside-out 的朝向保持原始 grid direction，而不是按 crossing 后的最终径向方向重新背离中心。V2/V3.1 的旧入口和旧行为没有改变。Crossing final 暂时仍使用 Global Height Limits；即使其最终位置理论上可以重新计算 local height，也不在 V3.2 中启用，以避免场景空洞造成错误 local limit。
 
 ## 7. 配置
 
@@ -220,9 +226,9 @@ python -m viewpoint_framework.generate_poses \
   --output_dir output
 ```
 
-Stage3 批量检查使用 `configs/stage3_v3_2_grid_only.json`。本次自动化验证结果为 `67 passed, 1 skipped`；skip 项是当前基础环境没有 Open3D 时的 native Open3D 查询，测试套件仍用精确 NumPy KNN adapter 覆盖相同的 clearance、path 和 final safety 生产逻辑。
+Stage3 批量检查使用 `configs/stage3_v3_2_grid_only.json`。本次自动化验证结果为 `68 passed, 1 skipped`；skip 项是当前基础环境没有 Open3D 时的 native Open3D 查询，测试套件仍用精确 NumPy KNN adapter 覆盖相同的 clearance、path 和 final safety 生产逻辑。
 
-新增测试覆盖：连续 segment/ray 的最小正交点、jump edge 不桥接、低置信 fallback、extension 不参与 global、global 两侧独立 fallback、global conflict、hole-uncertain effective limits、正负 signed radius 仅向内 height clip、不可达高度、以及 inside-out crossing 后按最终位置背离 scene center。
+新增测试覆盖：连续 segment/ray 的最小正交点、jump edge 不桥接、低置信 fallback、extension 不参与 global、global 两侧独立 fallback、global conflict、hole-uncertain effective limits、正负 signed radius 仅向内 height clip、不可达高度，以及 outside-in / inside-out non-crossing / inside-out crossing 三种最终朝向语义。
 
 ## 11. V3.2 暂不处理
 

@@ -16,7 +16,8 @@ from viewpoint_framework.height_safety import (
     resolve_effective_height,
     unavailable_local_height,
 )
-from viewpoint_framework.scene_types import SphericalFrame
+from viewpoint_framework.pose_generation_v32 import resolve_final_camera_forward
+from viewpoint_framework.scene_types import CameraMode, SphericalFrame
 from viewpoint_framework.tests.test_pose_generation_synthetic import _camera_at
 from viewpoint_framework.trajectory_safe_field import (
     TrajectorySafeField,
@@ -163,3 +164,28 @@ def test_height_limit_that_requires_outward_motion_is_unreachable():
     )
     assert not clipped.reachable
     assert clipped.radius == pytest.approx(1.0)
+
+
+def test_final_camera_forward_matches_all_three_motion_semantics():
+    grid = np.array([0.0, 0.0, 1.0])
+
+    # Outside-in final is on the sampled side and faces center.
+    outside_radial = grid
+    outside = resolve_final_camera_forward(CameraMode.OUTSIDE_IN, outside_radial, grid)
+    np.testing.assert_allclose(outside, -outside_radial)
+
+    # Inside-out non-crossing moves inward on the sampled side, while looking
+    # away from center in the original grid direction.
+    non_crossing_radial = grid
+    non_crossing = resolve_final_camera_forward(
+        CameraMode.INSIDE_OUT, non_crossing_radial, grid,
+    )
+    np.testing.assert_allclose(non_crossing, non_crossing_radial)
+
+    # After crossing, the same preserved grid direction points back toward
+    # scene center from the opposite side.
+    crossing_radial = -grid
+    crossing = resolve_final_camera_forward(
+        CameraMode.INSIDE_OUT, crossing_radial, grid,
+    )
+    np.testing.assert_allclose(crossing, -crossing_radial)
