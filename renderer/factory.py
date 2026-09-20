@@ -59,6 +59,9 @@ def _make_gs_render(module, gaussian_ply, config, device):
 def create_renderer(gaussian_ply, *, backend="auto", config=None, device="auto"):
     if backend not in ("auto", "gs_render", "gsplat"):
         raise ValueError("renderer backend must be auto, gs_render, or gsplat")
+    if config is None:
+        from viewpoint_framework.gs_renderer import GaussianRendererConfig
+        config = GaussianRendererConfig()
     print(f"[GS:RENDERER] requested={backend}")
     if backend in ("auto", "gs_render"):
         try:

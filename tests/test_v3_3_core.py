@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 import types
+from contextlib import nullcontext
 import pytest
 
 from viewpoint_framework.scene_types import CircularInterval
@@ -14,6 +15,7 @@ from viewpoint_framework.renderer.factory import (
     RendererRasterizationFailure, create_renderer,
 )
 import viewpoint_framework.renderer.factory as renderer_factory
+import viewpoint_framework.renderer.gs_render_backend as gs_render_backend
 from viewpoint_framework.renderer.gs_render_backend import compute_plane_depth
 
 
@@ -98,6 +100,23 @@ def test_renderer_factory_explicit_backend_and_failure_boundary(monkeypatch):
         renderer.render_geometry_depth(None)
 
 
+def test_renderer_factory_supplies_default_config(monkeypatch):
+    module = types.ModuleType("gs_render")
+    module.__version__ = "test"
+    monkeypatch.setitem(sys.modules, "gs_render", module)
+    captured = {}
+    fake = types.SimpleNamespace(device="cpu")
+
+    def make_renderer(module_arg, gaussian_ply, config, device):
+        captured["config"] = config
+        return fake
+
+    monkeypatch.setattr(renderer_factory, "_make_gs_render", make_renderer)
+    create_renderer("unused.ply", backend="gs_render")
+    assert captured["config"].scale_activation == "exp"
+    assert captured["config"].opacity_activation == "sigmoid"
+
+
 def test_auto_locks_to_imported_gs_render_on_initialization_error(monkeypatch):
     module = types.ModuleType("gs_render")
     monkeypatch.setitem(sys.modules, "gs_render", module)
@@ -136,6 +155,108 @@ def test_auto_does_not_fallback_for_gs_render_dependency_error(monkeypatch):
     with pytest.raises(ModuleNotFoundError, match="private dependency"):
         create_renderer("unused.ply", backend="auto")
     assert not gsplat_called
+
+
+class _FakeTensor:
+    def __init__(self, value):
+        self.value = np.asarray(value, dtype=np.float32)
+
+    def detach(self):
+        return self
+
+    def float(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.value
+
+
+def _mock_gs_render_renderer():
+    calls = []
+
+    class Api:
+        @staticmethod
+        def render(gs, cam, config):
+            calls.append(("render", gs, config))
+            return (
+                _FakeTensor(np.full((3, 2, 3), .25)),
+                _FakeTensor(np.full((1, 2, 3), .5)),
+                None, None, None, object(),
+            )
+
+        @staticmethod
+        def render_with_distance(gs, cam, config):
+            calls.append(("render_with_distance", gs, config))
+            return (
+                _FakeTensor(np.full((3, 2, 3), .25)),
+                _FakeTensor(np.full((1, 2, 3), .5)),
+                None, None,
+                _FakeTensor(np.ones((3, 2, 3))),
+                _FakeTensor(np.ones((1, 2, 3))),
+                object(),
+            )
+
+    module = types.SimpleNamespace(
+        GsRenderer=Api,
+        GsRenderConfigData=lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    renderer = object.__new__(gs_render_backend.GsRenderRenderer)
+    renderer.torch = types.SimpleNamespace(no_grad=nullcontext)
+    renderer.module = module
+    renderer.config = types.SimpleNamespace(background=(0., 0., 0.))
+    renderer.scene_data = types.SimpleNamespace(sh_degree=3)
+    renderer._geometry_data = "geometry"
+    renderer._full_data = "full"
+    renderer._tensor = lambda value: _FakeTensor(value)
+    renderer._camera_data = lambda camera, width, height: types.SimpleNamespace(
+        width=width, height=height, intrinsic=_FakeTensor([1., 1., 0., 0.]))
+    camera = types.SimpleNamespace(width=3, height=2)
+    return renderer, camera, calls
+
+
+def test_gs_render_rgb_uses_render_and_alpha_slot_one():
+    renderer, camera, calls = _mock_gs_render_renderer()
+    result = renderer.render_geometry_rgb_alpha(camera)
+    assert [call[0] for call in calls] == ["render"]
+    assert calls[0][2].render_normal is False
+    assert calls[0][2].render_depth is False
+    assert result.rgb.shape == (2, 3, 3)
+    assert np.all(result.alpha == .5)
+    assert result.depth is None
+
+
+def test_gs_render_depth_uses_distance_api_and_raw_outputs(monkeypatch):
+    renderer, camera, calls = _mock_gs_render_renderer()
+    captured = {}
+
+    def fake_plane_depth(normal, distance, cam_data, torch_module):
+        captured.update(normal=normal, distance=distance, camera=cam_data)
+        return _FakeTensor(np.full((2, 3), 2.))
+
+    monkeypatch.setattr(gs_render_backend, "compute_plane_depth", fake_plane_depth)
+    result = renderer.render_geometry_depth(camera)
+    assert [call[0] for call in calls] == ["render_with_distance"]
+    assert calls[0][2].render_normal is True
+    assert calls[0][2].render_depth is False
+    assert captured["normal"] is not None and captured["distance"] is not None
+    assert result.rgb is None
+    assert np.all(result.alpha == .5)
+    assert np.all(result.depth == 2.)
+
+
+def test_gs_render_combined_rgb_alpha_depth_is_one_distance_pass(monkeypatch):
+    renderer, camera, calls = _mock_gs_render_renderer()
+    monkeypatch.setattr(
+        gs_render_backend, "compute_plane_depth",
+        lambda *args: _FakeTensor(np.full((2, 3), 2.)))
+    result = renderer.render_geometry(camera, need_rgb=True, need_depth=True)
+    assert [call[0] for call in calls] == ["render_with_distance"]
+    assert result.rgb.shape == (2, 3, 3)
+    assert np.all(result.alpha == .5)
+    assert np.all(result.depth == 2.)
 
 
 def test_compute_plane_depth_returns_camera_z_depth():

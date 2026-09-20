@@ -5,7 +5,12 @@ import numpy as np
 from viewpoint_framework.renderer.scene_loader import load_gaussian_scene_data
 from viewpoint_framework.renderer.types import GaussianRenderResult
 
-RGB_INDEX, ALPHA_INDEX, DEPTH_INDEX, NORMAL_INDEX, DISTANCE_INDEX = 0, 2, 3, 4, 5
+# ``render``: color, alpha, semantic, depth, normal, extra_data.
+# ``render_with_distance`` inserts distance before extra_data.
+RGB_INDEX, ALPHA_INDEX = 0, 1
+DEPTH_INDEX, NORMAL_INDEX, DISTANCE_INDEX = 3, 4, 5
+RENDER_OUTPUT_COUNT = 6
+DISTANCE_OUTPUT_COUNT = 7
 
 
 def compute_plane_depth(rendered_normal, rendered_distance, cam_data, torch_module=None):
@@ -25,6 +30,8 @@ def compute_plane_depth(rendered_normal, rendered_distance, cam_data, torch_modu
 
 
 def _hwc_rgb(tensor, height, width):
+    if tensor is None:
+        raise ValueError("gs_render render returned no RGB tensor")
     value = np.squeeze(tensor.detach().float().cpu().numpy())
     if value.shape == (3, height, width):
         value = np.moveaxis(value, 0, -1)
@@ -34,6 +41,8 @@ def _hwc_rgb(tensor, height, width):
 
 
 def _hw(tensor, height, width, name):
+    if tensor is None:
+        raise ValueError(f"gs_render render returned no {name} tensor")
     value = np.squeeze(tensor.detach().float().cpu().numpy())
     if value.shape != (height, width):
         raise ValueError(f"gs_render {name} shape must be HxW, got {value.shape}")
@@ -100,22 +109,41 @@ class GsRenderRenderer:
                 [k[0, 0], k[1, 1], k[0, 2], k[1, 2]], dtype=np.float32)),
             exposure=None)
 
+    def _config_data(self, *, render_normal):
+        return self.module.GsRenderConfigData(
+            degree=int(self.scene_data.sh_degree),
+            bg_color=self._tensor(np.asarray(self.config.background, dtype=np.float32)),
+            render_depth=False, render_normal=bool(render_normal),
+            clamp_color_min=False, return_abs_grad=False, use_bucket=True)
+
     def _render(self, camera, *, max_image_dim=None, include_skybox=False,
                 need_rgb=True, need_depth=False):
         width, height = self.resolve_size(camera, max_image_dim)
         cam_data = self._camera_data(camera, width, height)
         gs_data = self._full_data if include_skybox else self._geometry_data
-        config_data = self.module.GsRenderConfigData(
-            degree=int(self.scene_data.sh_degree),
-            bg_color=self._tensor(np.asarray(self.config.background, dtype=np.float32)),
-            render_depth=False, render_normal=True, clamp_color_min=False,
-            return_abs_grad=False, use_bucket=True)
-        outputs = list(self.module.GsRenderer.render_with_distance(
-            gs_data, cam_data, config_data))
-        if len(outputs) <= DISTANCE_INDEX:
-            raise ValueError("gs_render render_with_distance returned an incomplete tuple")
-        outputs[DEPTH_INDEX] = compute_plane_depth(
-            outputs[NORMAL_INDEX], outputs[DISTANCE_INDEX], cam_data, self.torch)
+        config_data = self._config_data(render_normal=need_depth)
+        with self.torch.no_grad():
+            if need_depth:
+                outputs = list(self.module.GsRenderer.render_with_distance(
+                    gs_data, cam_data, config_data))
+                if len(outputs) != DISTANCE_OUTPUT_COUNT:
+                    raise ValueError(
+                        "gs_render render_with_distance must return 7 values, "
+                        f"got {len(outputs)}")
+                normal, distance = outputs[NORMAL_INDEX], outputs[DISTANCE_INDEX]
+                if normal is None or distance is None:
+                    raise ValueError(
+                        "gs_render render_with_distance returned no normal/distance "
+                        "with render_normal=True")
+                outputs[DEPTH_INDEX] = compute_plane_depth(
+                    normal, distance, cam_data, self.torch)
+            else:
+                outputs = list(self.module.GsRenderer.render(
+                    gs_data, cam_data, config_data))
+                if len(outputs) != RENDER_OUTPUT_COUNT:
+                    raise ValueError(
+                        "gs_render render must return 6 values, "
+                        f"got {len(outputs)}")
         rgb = _hwc_rgb(outputs[RGB_INDEX], height, width) if need_rgb else None
         alpha = _hw(outputs[ALPHA_INDEX], height, width, "alpha")
         depth = None

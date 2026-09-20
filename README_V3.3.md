@@ -64,7 +64,7 @@ Skybox split 发生在任何 finite filtering 之前，因此 tail 语义不会�
 - `gs_render` / `gsplat`：仅尝试指定 backend。
 - backend 一旦选定，render 过程绝不切换；rasterization 异常统一为 `Renderer Rasterization Failure`。
 
-`gs_render` adapter 直接构造 `GsRenderGaussianData`、`GsRenderCameraData` 和 `GsRenderConfigData`，调用 `GsRenderer.render_with_distance`，再通过 `compute_plane_depth(normal, distance, camera)` 转换为统一的 camera-space planar/Z depth。console 会输出 backend 与 version。`GaussianSceneData` 保存激活后的完整 Gaussian arrays、quaternion/features、唯一的 geometry/skybox mask、`skybox_center/radius` 与 metadata。V3.3 配置显式使用黑色 background，`clamp_color_min=false`。
+`gs_render` adapter 直接构造 `GsRenderGaussianData`、`GsRenderCameraData` 和 `GsRenderConfigData`。RGB/alpha-only 请求调用 `GsRenderer.render`；需要 depth 时调用 `GsRenderer.render_with_distance`，再通过 `compute_plane_depth(normal, distance, camera)` 转换为统一的 camera-space planar/Z depth。两条路径都从返回 tuple 的 index 1 读取 alpha，index 2 为可选 semantics。console 会输出 backend 与 version。`GaussianSceneData` 保存激活后的完整 Gaussian arrays、quaternion/features、唯一的 geometry/skybox mask、`skybox_center/radius` 与 metadata。V3.3 配置显式使用黑色 background，`clamp_color_min=false`。
 
 Stage3 每个最终相机只进行一次 geometry-only unified render，并输出：
 
@@ -105,6 +105,6 @@ visualizer 支持 V3.2/V3.3 metadata，显示 scene center、Global/Local Height
 
 ## 验证状态
 
-- 原有回归 + V3.3 专项单元测试：`78 passed, 2 skipped`。
+- 原有回归 + V3.3 专项单元测试：`82 passed, 2 skipped`。
 - 新增覆盖：hole 禁止 over-nominal、center guard/crossing、Coverage Consensus、360° 半开采样、raw PLY tail 40962 skybox、elevation center-out ordering、renderer backend/runtime failure contract，以及 import-success 后禁止 fallback。planar-depth 数值测试在安装 PyTorch 的环境执行，当前测试环境因此 skip。
 - V3.2 的 34-case 数字作为冻结基线记录于本文；本次代码环境未执行完整数据集批量渲染。正式接受 V3.3 前仍需在真实 `gs_render` 私有环境中验证 planar depth、geometry-only split、pano RGB/alpha/depth 对齐，并重跑 34-case 与高噪声专项 case。
