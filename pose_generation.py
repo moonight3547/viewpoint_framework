@@ -40,6 +40,7 @@ from viewpoint_framework.gs_depth_probe import (
 )
 from viewpoint_framework.gs_renderer import RendererNearPlaneConfig
 from viewpoint_framework.height_safety import GlobalHeightConfig, LocalHeightConfig
+from viewpoint_framework.stage2.config import GridConfig, RadiusConfig, RendererConfig
 from viewpoint_framework.skybox_detection import SkyboxDetectionConfig
 from viewpoint_framework.scene_types import (
     CameraMode,
@@ -134,6 +135,9 @@ class PoseGenerationConfig:
     renderer_near_plane: RendererNearPlaneConfig = field(default_factory=RendererNearPlaneConfig)
     local_height: LocalHeightConfig = field(default_factory=LocalHeightConfig)
     global_height: GlobalHeightConfig = field(default_factory=GlobalHeightConfig)
+    grid: GridConfig = field(default_factory=GridConfig)
+    radius: RadiusConfig = field(default_factory=RadiusConfig)
+    renderer: RendererConfig = field(default_factory=RendererConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
@@ -145,6 +149,9 @@ class PoseGenerationConfig:
         near_plane_data = payload.pop("renderer_near_plane", {})
         local_height_data = payload.pop("local_height", {})
         global_height_data = payload.pop("global_height", {})
+        grid_data = payload.pop("grid", {})
+        radius_data = payload.pop("radius", {})
+        renderer_data = payload.pop("renderer", {})
         cfg = cls(**payload)
         cfg.geometry = GeometrySafetyConfig(**geometry_data)
         cfg.trajectory_safe_field = TrajectorySafeFieldConfig(**trajectory_data)
@@ -153,6 +160,9 @@ class PoseGenerationConfig:
         cfg.renderer_near_plane = RendererNearPlaneConfig(**near_plane_data)
         cfg.local_height = LocalHeightConfig(**local_height_data)
         cfg.global_height = GlobalHeightConfig(**global_height_data)
+        cfg.grid = GridConfig(**grid_data)
+        cfg.radius = RadiusConfig(**radius_data)
+        cfg.renderer = RendererConfig(**renderer_data)
         return cfg
 
 
@@ -628,6 +638,7 @@ def generate_angular_grid(
             bbox.generation_azimuth,
             step_deg=az_step,
             include_end=config.include_bbox_end,
+            half_open_full_circle=str(config.version).startswith("3.3"),
         )
 
         for col, azimuth in enumerate(azimuths):
@@ -1128,6 +1139,18 @@ def generate_candidate_poses(
     else:
         raise ValueError(f"Unknown bbox_strategy: {config.bbox_strategy}")
 
+    v33_view_domain = None
+    if str(config.version).startswith("3.3"):
+        from viewpoint_framework.stage2.angular_grid import build_v33_bbox
+        # V3.3 owns angular sampling through the nested grid contract.  Keep
+        # the legacy flat fields synchronized because generate_angular_grid is
+        # also the compatibility entry point used by V1/V2.
+        config.azimuth_step_deg = float(config.grid.azimuth_step_deg)
+        config.elevation_step_deg = float(config.grid.elevation_step_deg)
+        bbox, v33_view_domain = build_v33_bbox(
+            captured_cameras, bbox, profile, mode_result.mode, config.grid,
+        )
+
     view_limits = build_view_limits(
         profile, bbox, config, dominant_relations=dominant_relations
     )
@@ -1140,6 +1163,12 @@ def generate_candidate_poses(
             return generate_v32_candidates(
                 captured_cameras, profile, bbox, view_limits, grid, mode_result,
                 point_cloud_points, depth_probe, config,
+            )
+        if str(config.version).startswith("3.3"):
+            from viewpoint_framework.stage2.pipeline import generate_v33_candidates
+            return generate_v33_candidates(
+                captured_cameras, profile, bbox, view_limits, grid, mode_result,
+                point_cloud_points, depth_probe, config, v33_view_domain,
             )
         from viewpoint_framework.pose_generation_v3 import generate_v3_candidates
         return generate_v3_candidates(

@@ -34,7 +34,7 @@ class SelectionConfig:
     near_duplicate_position_ratio: float = 0.01
 
     # Output ordering remains separate from selection.
-    ordering_strategy: str = "grid_order"  # grid_order | nearest_neighbor | selection_order
+    ordering_strategy: str = "grid_order"  # grid_order | nearest_neighbor | selection_order | elevation_center_out
     position_distance_weight: float = 0.20
 
 
@@ -334,6 +334,15 @@ def order_selected_views(
                 c.candidate_id,
             ),
         )
+    if config.ordering_strategy == "elevation_center_out":
+        elevations = [float(c.elevation_deg) for c in selected
+                      if c.elevation_deg is not None and np.isfinite(c.elevation_deg)]
+        center = 0.5 * (min(elevations) + max(elevations)) if elevations else 0.0
+        return sorted(selected, key=lambda c: (
+            abs(float(c.elevation_deg)-center) if c.elevation_deg is not None else float("inf"),
+            float(c.azimuth_deg) % 360.0 if c.azimuth_deg is not None else float("inf"),
+            c.candidate_id,
+        ))
     if config.ordering_strategy == "nearest_neighbor":
         if len(selected) <= 2:
             return selected

@@ -16,6 +16,7 @@ from viewpoint_framework.gs_renderer import (
     GsplatRenderer,
     resolve_renderer_near_plane,
 )
+from viewpoint_framework.renderer import create_renderer
 from viewpoint_framework.points_util import load_ply_point_cloud
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
@@ -53,6 +54,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--debug-mode", action="store_true")
     p.add_argument("--device", default="auto")
     p.add_argument("--pointcloud_max_points", type=int, default=0)
+    p.add_argument("--render-pano-depths", action="store_true")
 
     # Stage-2 high-value overrides.
     p.add_argument("--mode", choices=("auto", "outside_in", "inside_out"), default="auto")
@@ -78,7 +80,7 @@ def build_argparser() -> argparse.ArgumentParser:
         choices=("legacy_global_fps", "target_coverage_greedy", "artifixer_style_covisibility"),
         default=None,
     )
-    p.add_argument("--ordering-strategy", choices=("grid_order", "nearest_neighbor", "selection_order"), default=None)
+    p.add_argument("--ordering-strategy", choices=("grid_order", "nearest_neighbor", "selection_order", "elevation_center_out"), default=None)
     return p
 
 
@@ -105,6 +107,11 @@ def _build_configs(args):
     stage3_cfg.num_panos = int(args.num_panos)
     stage3_cfg.num_refs = int(args.num_refs)
     stage3_cfg.debug_mode = bool(args.debug_mode)
+    stage3_cfg.render_pano_depths = bool(
+        args.render_pano_depths or pose_cfg.renderer.render_pano_depths)
+    stage3_cfg.geometry_output_contract = bool(
+        stage3_cfg.geometry_output_contract
+        or str(pose_cfg.version).startswith("3.3"))
     if args.selection_strategy:
         stage3_cfg.selection.strategy = args.selection_strategy
     if args.selection_reference:
@@ -153,14 +160,19 @@ def main() -> None:
         cameras, scene_result.profile.center_fit.center, frame.y_axis,
         pose_cfg.renderer_near_plane,
     )
-    renderer = GsplatRenderer(
-        args.gaussian_ply,
-        config=GaussianRendererConfig(
-            near_plane=near_plane,
-            skybox=pose_cfg.skybox,
-        ),
-        device=args.device,
+    renderer_config = GaussianRendererConfig(
+        near_plane=near_plane,
+        skybox=pose_cfg.skybox,
+        background=tuple(pose_cfg.renderer.background),
     )
+    if str(pose_cfg.version).startswith("3.3"):
+        renderer = create_renderer(
+            args.gaussian_ply, backend=pose_cfg.renderer.backend,
+            config=renderer_config, device=args.device)
+    else:
+        # Preserve the V2/V3.0-V3.2 backend behavior exactly.
+        renderer = GsplatRenderer(
+            args.gaussian_ply, config=renderer_config, device=args.device)
     depth_probe = GsplatDepthProbe(
         renderer=renderer,
         config=DepthProbeConfig(
@@ -181,6 +193,8 @@ def main() -> None:
         config=pose_cfg,
     )
     pose_result.renderer_metadata = {
+        "backend": getattr(renderer, "backend_name", "unknown"),
+        "version": getattr(renderer, "backend_version", "unknown"),
         "near_plane": near_plane,
         "near_plane_strategy": pose_cfg.renderer_near_plane.strategy,
         "skybox": renderer.skybox_metadata,

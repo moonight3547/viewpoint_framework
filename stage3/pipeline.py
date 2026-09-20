@@ -54,6 +54,8 @@ class Stage3Config:
     num_panos: int = 49
     num_refs: int = 12
     debug_mode: bool = False
+    render_pano_depths: bool = False
+    geometry_output_contract: bool = False
 
     # The selected 40 captured views are expected in --select_view_dir.  This only
     # controls standalone fallback when that directory is not supplied.
@@ -397,6 +399,8 @@ def run_stage3(
         renderer,
         output_dir,
         debug_mode=config.debug_mode,
+        render_pano_depths=config.render_pano_depths,
+        geometry_output_contract=config.geometry_output_contract,
         stage2_grid_candidates=stage2_candidates,
     )
     return result, paths

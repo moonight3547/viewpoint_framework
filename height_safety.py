@@ -25,9 +25,11 @@ class LocalHeightConfig:
     center_patch_size: int = 3
     center_min_valid_ratio: float = 0.5
     use_nearest_depth: bool = True
+    probe_origin: str = "segment_endpoints"
+    depth_quantile: float = 0.10
 
     def validate(self) -> None:
-        if self.strategy != "geometry_depth_up_down":
+        if self.strategy not in ("geometry_depth_up_down", "geometry_depth_robust"):
             raise ValueError(f"Unsupported local-height strategy: {self.strategy}")
         if self.probe_resolution < 8:
             raise ValueError("local-height probe_resolution must be >= 8")
@@ -43,6 +45,10 @@ class LocalHeightConfig:
             raise ValueError("center_min_valid_ratio must be in (0,1]")
         if not self.use_nearest_depth:
             raise ValueError("V3.2 currently requires use_nearest_depth=true")
+        if self.probe_origin not in ("segment_endpoints", "trajectory_cross"):
+            raise ValueError("Unsupported local-height probe_origin")
+        if not 0.0 <= self.depth_quantile <= 1.0:
+            raise ValueError("depth_quantile must be in [0,1]")
 
 
 @dataclass
@@ -50,12 +56,18 @@ class GlobalHeightConfig:
     enabled: bool = False
     strategy: str = "strict_local_intersection"
     fallback: str = "captured_height_range"
+    support_ratio: float = 0.85
+    min_reliable_columns: int = 5
 
     def validate(self) -> None:
-        if self.strategy != "strict_local_intersection":
+        if self.strategy not in ("strict_local_intersection", "coverage_consensus"):
             raise ValueError(f"Unsupported global-height strategy: {self.strategy}")
         if self.fallback != "captured_height_range":
             raise ValueError(f"Unsupported global-height fallback: {self.fallback}")
+        if not 0.0 < self.support_ratio <= 1.0:
+            raise ValueError("global-height support_ratio must be in (0,1]")
+        if self.min_reliable_columns < 1:
+            raise ValueError("min_reliable_columns must be positive")
 
 
 @dataclass

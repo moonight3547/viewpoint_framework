@@ -24,6 +24,7 @@ from viewpoint_framework.skybox_detection import (
     SkyboxDetectionConfig,
     detect_skybox_gaussians,
 )
+from viewpoint_framework.renderer.types import GaussianRenderResult, GaussianSceneData
 
 
 @dataclass
@@ -63,15 +64,6 @@ def resolve_renderer_near_plane(cameras, center, up, config=None) -> float:
     if not np.isfinite(ratio) or ratio <= 0:
         raise ValueError("Renderer near-plane ratio must be finite and positive.")
     return max(ratio * float(np.median(radii)), 1e-6)
-
-
-@dataclass
-class GaussianRenderResult:
-    rgb: Optional[np.ndarray]       # H,W,3 float32 in renderer output range
-    alpha: np.ndarray               # H,W float32
-    depth: Optional[np.ndarray]     # H,W expected depth, 0 for invalid
-    width: int
-    height: int
 
 
 class GsplatRenderer:
@@ -194,6 +186,9 @@ class GsplatRenderer:
                 sh_coeffs = sh_coeffs[:, :keep]
             sh_degree = inferred
 
+        # Skybox tail detection must see the unfiltered raw PLY order.  The
+        # resulting mask is filtered only after classification.
+        raw_detection = detect_skybox_gaussians(means, scales, self.config.skybox)
         finite = (
             np.all(np.isfinite(means), axis=1)
             & np.all(np.isfinite(scales), axis=1)
@@ -213,8 +208,8 @@ class GsplatRenderer:
         if len(means) == 0:
             raise ValueError(f"No valid Gaussians found in {path}")
 
-        detection = detect_skybox_gaussians(means, scales, self.config.skybox)
-        skybox_mask = detection.skybox_mask
+        detection = raw_detection
+        skybox_mask = detection.skybox_mask[finite]
         geometry_mask = ~skybox_mask
         if not np.any(geometry_mask):
             raise ValueError("Skybox detector removed every Gaussian; refusing unsafe classification.")
@@ -247,6 +242,12 @@ class GsplatRenderer:
         self.skybox_means_np = means[skybox_mask]
         self.skybox_scales_np = scales[skybox_mask]
         self.skybox_opacities_np = opacities[skybox_mask]
+        self.scene_data = GaussianSceneData(
+            means, quats, scales, opacities, colors_np,
+            geometry_mask.copy(), skybox_mask.copy(),
+            self.skybox_center.copy(), self.skybox_radius,
+            {"source_path": self.source_path, "skybox": self.skybox_metadata},
+        )
 
         torch = self.torch
         # Store disjoint groups: there is no permanent full + geometry duplicate.
@@ -329,7 +330,7 @@ class GsplatRenderer:
                 height=height,
                 render_mode=render_mode,
                 sh_degree=self.sh_degree,
-                backgrounds=None,
+                backgrounds=bg[None],
                 near_plane=float(self.config.near_plane),
             )
 
@@ -383,6 +384,14 @@ class GsplatRenderer:
             need_depth=True,
             include_skybox=False,
         )
+
+    def render_geometry(self, camera, max_image_dim: Optional[int] = None,
+                        need_rgb: bool = True, need_alpha: bool = True,
+                        need_depth: bool = False) -> GaussianRenderResult:
+        """Unified V3.3 geometry-only RGB/alpha/planar-Z render call."""
+        return self.render(camera, max_image_dim=max_image_dim,
+                           need_rgb=need_rgb, need_depth=need_depth,
+                           include_skybox=False)
 
     def camera_inside_skybox(self, camera, margin: float = 0.0) -> bool:
         if len(self.skybox_means_np) == 0:

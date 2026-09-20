@@ -263,6 +263,7 @@ def sample_circular_interval(
     interval: CircularInterval,
     step_deg: float,
     include_end: bool = True,
+    half_open_full_circle: bool = False,
 ) -> np.ndarray:
     """Sample a circular interval along its positive direction."""
 
@@ -271,6 +272,15 @@ def sample_circular_interval(
 
     if interval.span_deg <= EPS:
         return np.asarray([interval.start_deg], dtype=np.float64)
+
+    # A full circle is half-open: including both endpoints duplicates the same
+    # direction (-180 == +180) and biases Stage-3 selection.
+    if half_open_full_circle and interval.span_deg >= 360.0 - 1e-9:
+        offsets = np.arange(0.0, 360.0 - 1e-9, step_deg, dtype=np.float64)
+        return np.asarray(
+            [normalize_angle_deg(interval.start_deg + offset) for offset in offsets],
+            dtype=np.float64,
+        )
 
     count = max(1, int(np.floor(interval.span_deg / step_deg)))
     offsets = np.arange(count + 1, dtype=np.float64) * step_deg

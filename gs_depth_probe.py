@@ -42,6 +42,9 @@ class DepthProbeResult:
     depth_q10: float
     depth_median: float
     depth_mean: float
+    hole_ratio: float = 1.0
+    center_valid: bool = False
+    hole_detected: bool = False
     note: str = ""
 
 
@@ -111,6 +114,13 @@ class GsplatDepthProbe:
         valid_pixels = int(np.count_nonzero(valid))
         total_pixels = int(valid.size)
         valid_ratio = valid_pixels / max(total_pixels, 1)
+        cy, cx = (valid.shape[0] - 1) // 2, (valid.shape[1] - 1) // 2
+        center_valid = bool(np.any(valid[
+            max(0, cy - 1):min(valid.shape[0], cy + 2),
+            max(0, cx - 1):min(valid.shape[1], cx + 2),
+        ]))
+        hole_ratio = 1.0 - valid_ratio
+        hole_detected = bool(hole_ratio > 0.5 and not center_valid)
 
         if (
             valid_pixels < int(self.config.min_valid_pixels)
@@ -125,6 +135,9 @@ class GsplatDepthProbe:
                 depth_q10=0.0,
                 depth_median=0.0,
                 depth_mean=0.0,
+                hole_ratio=hole_ratio,
+                center_valid=center_valid,
+                hole_detected=hole_detected,
                 note="insufficient alpha-supported depth pixels",
             )
 
@@ -151,6 +164,9 @@ class GsplatDepthProbe:
             depth_q10=q_depth,
             depth_median=median,
             depth_mean=mean,
+            hole_ratio=hole_ratio,
+            center_valid=center_valid,
+            hole_detected=hole_detected,
         )
 
 

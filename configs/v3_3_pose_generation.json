@@ -1,0 +1,97 @@
+{
+  "version": "3.3",
+  "mode_strategy": "binary_count_majority",
+  "bbox_strategy": "binary_dominant",
+  "position_strategy": "trajectory_safe_field",
+  "include_bbox_end": true,
+  "grid": {
+    "azimuth_step_deg": 20.0,
+    "elevation_step_deg": 20.0,
+    "azimuth_extension_ratio": 0.10,
+    "azimuth_min_extension_deg": 20.0,
+    "azimuth_close_loop_gap_deg": 90.0,
+    "elevation_strategy": "eye_pitch_fov",
+    "elevation_percentiles": [2.0, 98.0],
+    "elevation_extension_ratio": 0.10,
+    "elevation_min_extension_deg": 10.0,
+    "elevation_hard_min_deg": -80.0,
+    "elevation_hard_max_deg": 80.0
+  },
+  "trajectory_safe_field": {
+    "max_step_multiplier": 5.0,
+    "resample_step_ratio": 0.5,
+    "azimuth_support_deg": 10.0,
+    "max_angular_gap_deg": 30.0,
+    "tube_radius_ratio": 0.04,
+    "unsupported_behavior": "nearest_limited",
+    "rho_strategy": "segment_ray_min",
+    "fallback_strategy": "v3_1",
+    "fallback_confidence_threshold": 0.2
+  },
+  "local_height": {
+    "enabled": true,
+    "strategy": "geometry_depth_robust",
+    "probe_origin": "trajectory_cross",
+    "probe_resolution": 64,
+    "central_crop_ratio": 0.5,
+    "alpha_threshold": 0.05,
+    "depth_quantile": 0.10,
+    "center_patch_size": 3,
+    "center_min_valid_ratio": 0.5,
+    "hole_ratio_threshold": 0.5,
+    "use_nearest_depth": true
+  },
+  "global_height": {
+    "enabled": true,
+    "strategy": "coverage_consensus",
+    "support_ratio": 0.85,
+    "min_reliable_columns": 5,
+    "fallback": "captured_height_range"
+  },
+  "radius": {
+    "center_guard_clearance_ratio": 1.0,
+    "nominal_captured_max_ratio": 2.0,
+    "over_nominal_strategy": "one_third_depth_extension",
+    "emergency_strategy": "skybox_or_geometry_q99"
+  },
+  "renderer": {
+    "backend": "auto",
+    "background": [0.0, 0.0, 0.0],
+    "clamp_color_min": false,
+    "render_pano_depths": false
+  },
+  "skybox": {
+    "enabled": true,
+    "strategy": "tail_strict",
+    "expected_tail_count": 40962,
+    "radial_band_ratio": 0.005,
+    "strict_scale_axis_ratio": 0.02,
+    "strict_scale_cv": 0.02,
+    "strict_radial_coverage": 0.995,
+    "strict_angular_coverage": 0.95
+  },
+  "renderer_near_plane": {
+    "strategy": "captured_radius_ratio",
+    "ratio": 0.01
+  },
+  "geometry": {
+    "strategy": "pointcloud_knn",
+    "clearance_strategy": "local_horizontal_radius",
+    "local_clearance_ratio": 0.05,
+    "local_clearance_min_ratio": 0.01,
+    "local_clearance_max_ratio": 0.10,
+    "knn_k": 3,
+    "path_step_ratio": 0.5,
+    "max_path_samples": 96,
+    "path_backoff_ratio": 0.75
+  },
+  "depth_margin_ratio": 1.0,
+  "use_path_safety": true,
+  "reject_unsafe_initial_prior": true,
+  "intrinsics_strategy": "first_scaled",
+  "focal_ratio": 0.7,
+  "center_principal_point": true,
+  "view_limits_strategy": "generation_bbox",
+  "view_limits_unwrap_azimuth": true,
+  "console_log_candidates": false
+}

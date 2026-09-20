@@ -30,19 +30,41 @@ def _write_rgb_png(path: Path, rgb: np.ndarray) -> None:
         raise IOError(f"Failed to write image: {path}")
 
 
+def _write_alpha_png(path: Path, alpha: np.ndarray) -> None:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise ImportError("Rendering PNG outputs requires opencv-python (cv2).") from exc
+    image = (np.clip(np.asarray(alpha, dtype=np.float32), 0., 1.)*255.+.5).astype(np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), image):
+        raise IOError(f"Failed to write alpha: {path}")
+
+
 def render_camera_sequence(
     renderer: GsplatRenderer,
     cameras: Sequence[Camera],
     output_dir: Path,
     *,
     prefix: str = "frame",
+    alpha_dir: Path | None = None,
+    depth_dir: Path | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, camera in enumerate(cameras):
-        rgb = renderer.render_rgb(camera, max_image_dim=None)
+        result = renderer.render_geometry(
+            camera, max_image_dim=None, need_rgb=True, need_alpha=True,
+            need_depth=depth_dir is not None)
+        rgb = result.rgb
         path = output_dir / f"{prefix}_{i:04d}.png"
         _write_rgb_png(path, rgb)
+        if alpha_dir is not None:
+            _write_alpha_png(alpha_dir / f"{prefix}_{i:04d}.png", result.alpha)
+        if depth_dir is not None:
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            np.save(depth_dir / f"{prefix}_{i:04d}.npy",
+                    np.asarray(result.depth, dtype=np.float32))
         paths.append(str(path))
     return paths
 
@@ -53,6 +75,8 @@ def save_stage3_outputs(
     output_dir: str,
     *,
     debug_mode: bool,
+    render_pano_depths: bool = False,
+    geometry_output_contract: bool = False,
     stage2_grid_candidates: Sequence[SelectionCandidate],
 ) -> Dict[str, str]:
     root = Path(output_dir).expanduser().resolve()
@@ -60,11 +84,30 @@ def save_stage3_outputs(
 
     pano_cameras_path = root / "pano_cameras.json"
     pano_images_dir = root / "pano_images"
+    pano_alphas_dir = root / "pano_alphas" if geometry_output_contract else None
+    pano_depths_dir = (root / "pano_depths"
+                       if geometry_output_contract and render_pano_depths else None)
     traj_refs_path = root / "traj_refs.json"
     traj_lens_path = root / "traj_lens.json"
 
     save_cameras_json(result.selected_cameras, str(pano_cameras_path))
-    render_camera_sequence(renderer, result.selected_cameras, pano_images_dir, prefix="frame")
+    if geometry_output_contract:
+        render_camera_sequence(renderer, result.selected_cameras, pano_images_dir,
+                               prefix="frame", alpha_dir=pano_alphas_dir,
+                               depth_dir=pano_depths_dir)
+    else:
+        # V2/V3.0-V3.2 retain the original full-RGB render path and outputs.
+        pano_images_dir.mkdir(parents=True, exist_ok=True)
+        for i, camera in enumerate(result.selected_cameras):
+            _write_rgb_png(pano_images_dir / f"frame_{i:04d}.png",
+                           renderer.render_rgb(camera, max_image_dim=None))
+    if pano_depths_dir is not None:
+        with open(pano_depths_dir / "depth_meta.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "convention": "camera_z_planar_depth", "dtype": "float32",
+                "invalid_value": 0.0, "skybox_included": False,
+                "renderer_backend": getattr(renderer, "backend_name", "gsplat"),
+            }, f, indent=2)
 
     # Keep the previous nested contract: [[idx0, idx1, ...]].
     with open(traj_refs_path, "w", encoding="utf-8") as f:
@@ -78,6 +121,10 @@ def save_stage3_outputs(
         "traj_refs": str(traj_refs_path),
         "traj_lens": str(traj_lens_path),
     }
+    if pano_alphas_dir is not None:
+        paths["pano_alphas"] = str(pano_alphas_dir)
+    if pano_depths_dir is not None:
+        paths["pano_depths"] = str(pano_depths_dir)
 
     if debug_mode:
         debug_dir = root / "debug"

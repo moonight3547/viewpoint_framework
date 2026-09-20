@@ -1,0 +1,20 @@
+{
+  "num_panos": 49,
+  "num_refs": 12,
+  "debug_mode": false,
+  "render_pano_depths": false,
+  "geometry_output_contract": true,
+  "selection": {
+    "strategy": "angular_fps",
+    "reference": "captured_seeded",
+    "information_gain_strategy": "none",
+    "coverage_include_captured": true,
+    "quality_strategy": "none",
+    "near_duplicate_filter": true,
+    "ordering_strategy": "elevation_center_out"
+  },
+  "holes": {
+    "strategy": "none",
+    "max_views_per_hole": 0
+  }
+}

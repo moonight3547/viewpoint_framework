@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive V3.2 placement/generalization diagnostics.
+"""Interactive V3.2/V3.3 placement/generalization diagnostics.
 
 The plot separates raw/corrected initial positions, rejected conflicts, final
 grid candidates, and Stage-3 selected grid candidates.  It consumes the normal
@@ -46,13 +46,14 @@ def _point(value):
     return result if result.shape == (3,) and np.isfinite(result).all() else None
 
 
-def _selected_grid_ids(path: Optional[str]) -> set[int]:
+def _selected_grid_ids(path: Optional[str]) -> dict[int, int]:
     if not path:
-        return set()
+        return {}
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     rows = payload.get("selected_candidates", []) if isinstance(payload, dict) else []
-    return {int(row["grid_id"]) for row in rows if row.get("grid_id") is not None}
+    return {int(row["grid_id"]): index for index, row in enumerate(rows)
+            if row.get("grid_id") is not None}
 
 
 def _hover(candidate):
@@ -63,6 +64,11 @@ def _hover(candidate):
         "initial_height_limit_source", "final_height_limit_source",
         "initial_height_clip_applied", "final_height_clip_applied",
         "adjustment_type", "adjustment_skip_reason", "final_signed_radius",
+        "column_kind", "h_cross", "height_source", "center_guard",
+        "raw_signed_radius", "nominal_radius_cap", "emergency_radius_cap",
+        "radius_extension_attempted", "radius_extension_blocked_by_hole",
+        "radius_choice", "radius_branch", "probe_hole_detected",
+        "final_output_index",
     )
     lines = [f"<b>grid {candidate.get('grid_id')}</b>",
              f"status: {candidate.get('status')}",
@@ -81,6 +87,21 @@ def _points_trace(rows, position_key, color, name, *, symbol="circle", size=5):
         marker={"size": size, "color": color, "symbol": symbol}, name=name,
         text=[_hover(item[1]) for item in packed],
         hovertemplate="%{text}<extra></extra>", legendgroup=name,
+    )
+
+
+def _frame_label_trace(rows):
+    packed = [(p, c) for c in rows
+              if (p := _point(c.get("geometry_metadata", {}).get("final_position"))) is not None]
+    if not packed:
+        return None
+    points = np.asarray([item[0] for item in packed])
+    labels = [f"frame_{int(item[1]['geometry_metadata']['final_output_index']):04d}"
+              for item in packed]
+    return go.Scatter3d(
+        x=points[:, 0], y=points[:, 1], z=points[:, 2], mode="text",
+        text=labels, textposition="top center", name="Final Selected View labels",
+        hoverinfo="skip", showlegend=False,
     )
 
 
@@ -156,7 +177,12 @@ def _local_limit_segments(columns: Iterable[dict], center, up, frame_x, frame_z)
     for column in columns:
         if column.get("is_extension_column"):
             continue
-        lower, upper = column.get("lower_safe"), column.get("upper_safe")
+        lower = column.get("lower_safe")
+        upper = column.get("upper_safe")
+        if lower is None and isinstance(column.get("lower"), dict):
+            lower = column["lower"].get("safe_limit")
+        if upper is None and isinstance(column.get("upper"), dict):
+            upper = column["upper"].get("safe_limit")
         if lower is None or upper is None:
             continue
         angle = np.radians(float(column["azimuth_deg"]))
@@ -175,16 +201,19 @@ def _local_limit_segments(columns: Iterable[dict], center, up, frame_x, frame_z)
 def visualize_candidate_placements(point_cloud_path, metadata_path, output_path,
                                    stage3_metadata_path=None, max_points=100000,
                                    point_size=1.4, point_opacity=0.42,
-                                   show_local_limits=False):
+                                   show_local_limits=False, camera_scale=None):
     with open(metadata_path, "r", encoding="utf-8") as handle:
         metadata = json.load(handle)
-    if str(metadata.get("config", {}).get("version", ""))[:3] != "3.2":
-        raise ValueError("Candidate placement visualization requires V3.2 metadata.")
+    version = str(metadata.get("config", {}).get("version", ""))
+    if not (version.startswith("3.2") or version.startswith("3.3")):
+        raise ValueError("Candidate placement visualization requires V3.2/V3.3 metadata.")
     candidates = metadata.get("candidates", [])
     selected_ids = _selected_grid_ids(stage3_metadata_path)
     selected = [row for row in candidates if int(row.get("grid_id", -1)) in selected_ids and row.get("camera")]
     unselected = [row for row in candidates if row.get("camera") and int(row.get("grid_id", -1)) not in selected_ids]
     conflicts = [row for row in candidates if not row.get("camera")]
+    for row in selected:
+        row.setdefault("geometry_metadata", {})["final_output_index"] = selected_ids[int(row["grid_id"])]
 
     cloud = load_ply_point_cloud(point_cloud_path, max_points=max_points)
     colors = (np.clip(cloud.colors, 0.0, 1.0) * 0.55 + 0.45 if cloud.colors is not None else None)
@@ -200,7 +229,7 @@ def visualize_candidate_placements(point_cloud_path, metadata_path, output_path,
     conflict = _points_trace(conflicts, "corrected_initial_position", CONFLICT_COLOR, "Rejected/conflict", symbol="x", size=6)
     final = _points_trace(unselected, "final_position", FINAL_COLOR, "Final unselected")
     chosen = _points_trace(selected, "final_position", SELECTED_COLOR, "Stage-3 selected", size=7)
-    for trace in (initial, conflict, final, chosen,
+    for trace in (initial, conflict, final, chosen, _frame_label_trace(selected),
                   _segments(candidates, "corrected_initial_position", "final_position", FINAL_COLOR, "Initial to final"),
                   _segments(candidates, "raw_initial_position", "corrected_initial_position", INITIAL_COLOR, "Height correction", width=4)):
         if trace is not None:
@@ -212,6 +241,10 @@ def visualize_candidate_placements(point_cloud_path, metadata_path, output_path,
     up, frame_x, frame_z = _point(frame.get("up_axis")), _point(frame.get("x_axis")), _point(frame.get("z_axis"))
     global_height = metadata.get("global_height", {})
     if center is not None and up is not None:
+        figure.add_trace(go.Scatter3d(
+            x=[center[0]], y=[center[1]], z=[center[2]], mode="markers",
+            marker={"size": 9, "color": "#D62728", "symbol": "diamond"},
+            name="Scene center", hovertemplate="scene_center<extra></extra>"))
         extent = max(cloud.diagonal * 0.55, 1e-3)
         for key, color, name in (("height_min", "#7A68A6", "Global height min"),
                                  ("height_max", "#A6687A", "Global height max")):
@@ -222,14 +255,17 @@ def visualize_candidate_placements(point_cloud_path, metadata_path, output_path,
             if trace is not None:
                 figure.add_trace(trace)
 
-    depth = max(cloud.diagonal * 0.015, 1e-4)
+    median_rho = placement.get("median_captured_horizontal_radius")
+    depth = (max(float(camera_scale), 1e-4) if camera_scale is not None else
+             max(float(median_rho) * 0.04, 1e-4) if median_rho is not None
+             else max(cloud.diagonal * 0.015, 1e-4))
     for rows, color, name in ((unselected, FINAL_COLOR, "Final unselected"),
                               (selected, SELECTED_COLOR, "Stage-3 selected")):
         trace = _frustum_trace(rows, color, name, depth)
         if trace is not None:
             figure.add_trace(trace)
     figure.update_layout(
-        title=f"V3.2 Candidate Placements — valid {len(unselected) + len(selected)}, rejected {len(conflicts)}, selected {len(selected)}",
+        title=f"V{version} Candidate Placements — valid {len(unselected) + len(selected)}, rejected {len(conflicts)}, selected {len(selected)}",
         margin={"l": 0, "r": 0, "t": 55, "b": 0}, height=900,
         scene={"aspectmode": "data", "xaxis_title": "World X", "yaxis_title": "World Y", "zaxis_title": "World Z"},
         legend={"groupclick": "togglegroup"}, hoverlabel={"bgcolor": "white", "font_size": 11},
@@ -237,12 +273,12 @@ def visualize_candidate_placements(point_cloud_path, metadata_path, output_path,
     output = prepare_html_output_path(output_path)
     figure.write_html(str(output), include_plotlyjs=True, full_html=True,
                       config={"displaylogo": False, "scrollZoom": True, "responsive": True})
-    print(f"[V3.2 visualization] {output}")
+    print(f"[V{version} visualization] {output}")
     return str(output)
 
 
 def build_argparser():
-    parser = argparse.ArgumentParser(description="Visualize V3.2 candidate placement and height safety.")
+    parser = argparse.ArgumentParser(description="Visualize V3.2/V3.3 candidate placement and height safety.")
     parser.add_argument("--point_cloud", required=True)
     parser.add_argument("--metadata", required=True, help="Stage-2 gen_cameras_meta.json")
     parser.add_argument("--stage3_metadata", default=None, help="Optional Stage-3 debug/stage3_metadata.json")
@@ -251,6 +287,7 @@ def build_argparser():
     parser.add_argument("--point_size", type=float, default=1.4)
     parser.add_argument("--point_opacity", type=float, default=0.42)
     parser.add_argument("--show_local_limits", action="store_true")
+    parser.add_argument("--camera-scale", type=float, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--open_browser", action="store_true")
@@ -264,7 +301,7 @@ def main():
         args.point_cloud, args.metadata, args.output,
         stage3_metadata_path=args.stage3_metadata, max_points=args.max_points,
         point_size=args.point_size, point_opacity=args.point_opacity,
-        show_local_limits=args.show_local_limits,
+        show_local_limits=args.show_local_limits, camera_scale=args.camera_scale,
     )
     if not args.no_serve:
         serve_html(html, host=args.host, port=args.port, open_browser=args.open_browser)
