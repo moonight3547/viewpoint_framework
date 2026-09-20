@@ -51,29 +51,42 @@ def _make_gsplat(gaussian_ply, config, device):
     return GsplatRenderer(gaussian_ply, config=config, device=device), module
 
 
-def _make_gs_render(gaussian_ply, config, device):
-    module = importlib.import_module("gs_render")
-    # Private backend contract is deliberately exact, not capability-probed.
-    renderer = module.create_renderer(gaussian_ply, config=config, device=device)
-    return renderer, module
+def _make_gs_render(module, gaussian_ply, config, device):
+    from viewpoint_framework.renderer.gs_render_backend import GsRenderRenderer
+    return GsRenderRenderer(gaussian_ply, module, config, device=device)
 
 
 def create_renderer(gaussian_ply, *, backend="auto", config=None, device="auto"):
     if backend not in ("auto", "gs_render", "gsplat"):
         raise ValueError("renderer backend must be auto, gs_render, or gsplat")
-    attempts = ("gs_render", "gsplat") if backend == "auto" else (backend,)
-    failures = []
-    for name in attempts:
+    print(f"[GS:RENDERER] requested={backend}")
+    if backend in ("auto", "gs_render"):
         try:
-            renderer, module = (_make_gs_render(gaussian_ply, config, device)
-                                if name == "gs_render"
-                                else _make_gsplat(gaussian_ply, config, device))
-        except (ImportError, ModuleNotFoundError) as exc:
-            failures.append(f"{name}: {exc}")
-            continue
-        version = _version(name, module)
-        print(f"[GS:RENDERER] backend={name} version={version}")
-        wrapped = _FailureBoundary(renderer, name, version)
-        wrapped.metadata = {"backend": name, "version": version}
-        return wrapped
-    raise NoRendererAvailable("No Renderer Available. " + " | ".join(failures))
+            module = importlib.import_module("gs_render")
+        except ModuleNotFoundError as exc:
+            if exc.name != "gs_render":
+                raise
+            if backend == "gs_render":
+                raise NoRendererAvailable(
+                    f"No Renderer Available. gs_render: {exc}") from exc
+            print(f"[GS:RENDERER] gs_render unavailable: {exc}")
+        else:
+            # Import success locks this invocation to gs_render. Any adapter
+            # initialization failure propagates; gsplat is never attempted.
+            renderer = _make_gs_render(module, gaussian_ply, config, device)
+            version = _version("gs_render", module)
+            print(f"[GS:RENDERER] backend=gs_render version={version} device={renderer.device}")
+            wrapped = _FailureBoundary(renderer, "gs_render", version)
+            wrapped.metadata = {"backend": "gs_render", "version": version}
+            return wrapped
+    try:
+        renderer, module = _make_gsplat(gaussian_ply, config, device)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise NoRendererAvailable(f"No Renderer Available. gsplat: {exc}") from exc
+    version = _version("gsplat", module)
+    if backend == "auto":
+        print("[GS:RENDERER] fallback backend=gsplat")
+    print(f"[GS:RENDERER] backend=gsplat version={version} device={renderer.device}")
+    wrapped = _FailureBoundary(renderer, "gsplat", version)
+    wrapped.metadata = {"backend": "gsplat", "version": version}
+    return wrapped

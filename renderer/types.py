@@ -10,7 +10,9 @@ class GaussianSceneData:
     quats: np.ndarray
     scales: np.ndarray
     opacities: np.ndarray
-    features: np.ndarray
+    features_dc: np.ndarray
+    features_sh: np.ndarray
+    sh_degree: int
     geometry_mask: np.ndarray
     skybox_mask: np.ndarray
     skybox_center: np.ndarray
@@ -28,6 +30,10 @@ class GaussianSceneData:
     @property
     def skybox_present(self):
         return bool(np.any(self.skybox_mask))
+
+    @property
+    def features(self):
+        return np.concatenate((self.features_dc, self.features_sh), axis=1)
 
 
 @dataclass

@@ -13,6 +13,8 @@ from viewpoint_framework.height_safety import LOCAL_RELIABLE
 from viewpoint_framework.renderer.factory import (
     RendererRasterizationFailure, create_renderer,
 )
+import viewpoint_framework.renderer.factory as renderer_factory
+from viewpoint_framework.renderer.gs_render_backend import compute_plane_depth
 
 
 def _side(limit):
@@ -85,9 +87,64 @@ def test_renderer_factory_explicit_backend_and_failure_boundary(monkeypatch):
             raise RuntimeError("rasterizer exploded")
     module = types.ModuleType("gs_render")
     module.__version__ = "test"
-    module.create_renderer = lambda *args, **kwargs: BrokenRenderer()
     monkeypatch.setitem(sys.modules, "gs_render", module)
+    broken = BrokenRenderer()
+    broken.device = "cpu"
+    monkeypatch.setattr(renderer_factory, "_make_gs_render",
+                        lambda *args, **kwargs: broken)
     renderer = create_renderer("unused.ply", backend="gs_render")
     assert renderer.backend_name == "gs_render"
     with pytest.raises(RendererRasterizationFailure, match="Renderer Rasterization Failure"):
         renderer.render_geometry_depth(None)
+
+
+def test_auto_locks_to_imported_gs_render_on_initialization_error(monkeypatch):
+    module = types.ModuleType("gs_render")
+    monkeypatch.setitem(sys.modules, "gs_render", module)
+    monkeypatch.setattr(renderer_factory, "_make_gs_render",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("init failed")))
+    gsplat_called = []
+    monkeypatch.setattr(renderer_factory, "_make_gsplat",
+                        lambda *args, **kwargs: gsplat_called.append(True))
+    with pytest.raises(RuntimeError, match="init failed"):
+        create_renderer("unused.ply", backend="auto")
+    assert not gsplat_called
+
+
+def test_auto_falls_back_only_when_top_level_gs_render_is_missing(monkeypatch):
+    original_import = renderer_factory.importlib.import_module
+    def missing_top_level(name):
+        if name == "gs_render":
+            raise ModuleNotFoundError("no gs_render", name="gs_render")
+        return original_import(name)
+    fallback = types.SimpleNamespace(device="cpu")
+    module = types.SimpleNamespace(__version__="test")
+    monkeypatch.setattr(renderer_factory.importlib, "import_module", missing_top_level)
+    monkeypatch.setattr(renderer_factory, "_make_gsplat",
+                        lambda *args, **kwargs: (fallback, module))
+    result = create_renderer("unused.ply", backend="auto")
+    assert result.backend_name == "gsplat"
+
+
+def test_auto_does_not_fallback_for_gs_render_dependency_error(monkeypatch):
+    def missing_dependency(name):
+        raise ModuleNotFoundError("missing private dependency", name="private_dep")
+    gsplat_called = []
+    monkeypatch.setattr(renderer_factory.importlib, "import_module", missing_dependency)
+    monkeypatch.setattr(renderer_factory, "_make_gsplat",
+                        lambda *args, **kwargs: gsplat_called.append(True))
+    with pytest.raises(ModuleNotFoundError, match="private dependency"):
+        create_renderer("unused.ply", backend="auto")
+    assert not gsplat_called
+
+
+def test_compute_plane_depth_returns_camera_z_depth():
+    torch = pytest.importorskip("torch")
+    normal = torch.zeros((3, 2, 3), dtype=torch.float32)
+    normal[2] = -1.0
+    distance = torch.full((1, 2, 3), 2.0, dtype=torch.float32)
+    cam = types.SimpleNamespace(
+        intrinsic=torch.tensor([2.0, 2.0, 1.0, 0.5]), height=2, width=3)
+    depth = compute_plane_depth(normal, distance, cam, torch)
+    assert depth.shape == (2, 3)
+    assert torch.allclose(depth, torch.full((2, 3), 2.0), atol=1e-6)

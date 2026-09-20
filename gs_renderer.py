@@ -243,7 +243,11 @@ class GsplatRenderer:
         self.skybox_scales_np = scales[skybox_mask]
         self.skybox_opacities_np = opacities[skybox_mask]
         self.scene_data = GaussianSceneData(
-            means, quats, scales, opacities, colors_np,
+            means, quats, scales, opacities,
+            (colors_np[:, :1, :] if colors_np.ndim == 3 else colors_np[:, None, :]),
+            (colors_np[:, 1:, :] if colors_np.ndim == 3 else
+             np.empty((len(colors_np), 0, 3), dtype=np.float32)),
+            int(sh_degree or 0),
             geometry_mask.copy(), skybox_mask.copy(),
             self.skybox_center.copy(), self.skybox_radius,
             {"source_path": self.source_path, "skybox": self.skybox_metadata},
