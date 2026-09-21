@@ -37,7 +37,7 @@ V3.2 的主要限制是 proposal 仍偏保守：`radius_max` 对原地/窄轨迹
 
 Local Height 的 probe origin 固定为 `P_traj(phi) = rho(phi) × h_cross(phi)`，向上/向下分别 geometry-only render。障碍距离采用 central crop Q10，并用中心 3×3 patch 的最小距离作 safeguard。`hole_ratio > 0.5 && center invalid` 标记为 hole-uncertain，不把空洞当作无限安全空间。
 
-Global Height 使用 0.85 Coverage Consensus。多 band 时优先选择包含 captured median height 的 band，否则选择离 median 最近者。没有 consensus band 时，优先选择 endpoint sweep 中包含 median 的 elementary segment；small-N 使用 strict intersection，最终才退回 captured height range。margin 只在 Local Height 中扣除一次。
+批量测试发现 Coverage Consensus 在部分场景会放宽到贴地面或越过吊灯的高度。当前 V3.3 安全基线暂时强制使用所有可靠 Local Height interval 的 strict common intersection；交集为空或没有可靠 interval 时回退 captured height range。Coverage Consensus 实现仍保留，等待后续版本实验改进。margin 只在 Local Height 中扣除一次。
 
 ### 4. Radius 与 crossing
 
@@ -72,7 +72,7 @@ Stage3 每个最终相机只进行一次 geometry-only unified render，并输�
 - `pano_alphas/frame_XXXX.png`：geometry-only 单通道 uint8 alpha；
 - 可选 `pano_depths/frame_XXXX.npy`：float32 camera-Z planar depth，0 表示 invalid，并带 `depth_meta.json`。
 
-新增 `--render-pano-depths`。Stage3 baseline 关闭 focused hole views，并提供 `elevation_center_out` 输出顺序：先 elevation center-out，再 azimuth circular order，最后 stable candidate id。
+新增 `--render-pano-depths`。Stage3 baseline 关闭 focused hole views，并提供 `elevation_center_out` 输出顺序：先完整输出最接近 elevation midpoint 的 grid row，再依次完整输出向上的 rows，最后依次完整输出向下的 rows；每一行严格按 circular grid column 排列，最后才使用 stable candidate id 打破平局。
 
 ## 目录与兼容性
 
@@ -105,6 +105,13 @@ visualizer 支持 V3.2/V3.3 metadata，显示 scene center、Global/Local Height
 
 ## `gs_render` contract smoke test
 
+The canonical scene loader preserves the PLY optimization representation:
+unnormalized quaternions, log-scales, and opacity logits. `gs_render` receives
+those raw tensors because it performs normalization/`exp`/`sigmoid` internally.
+The `gsplat` adapter activates the same canonical arrays at its own boundary.
+Geometry-side NumPy fields and skybox scale checks continue to use activated,
+physical values.
+
 针对首次 Stage2 depth probe 的 CUDA illegal memory access，新增真实私有 backend 隔离脚本：
 
 ```bash
@@ -116,12 +123,12 @@ python -m viewpoint_framework.renderer.gs_render_contract_smoke \
   --output-dir <output>/gs_render_contract_smoke
 ```
 
-脚本依次在五个独立 Python 进程中测试 `full+render`、`geometry-only+render`、`geometry-only+render_with_distance`、`probe-resized+render` 和 `probe-resized+render_with_distance`。每次 rasterization 前记录 GaussianData/CameraData/config 的 shape、dtype、device、contiguous、finite 与数值范围，CUDA 同步成功后输出 `GS:SMOKE_PRE_RASTER_OK`；rasterization 后再次同步并记录返回 tuple。这样某个 case 的 illegal memory access 不会污染后续 case，`summary.json` 会标出第一个失败的核心组合。
+脚本默认只在独立 Python 进程中测试 `full_render`。只有显式传入 `--cases`时才会运行 `geometry_render`、`geometry_distance`、`probe_render` 或 `probe_distance`，避免在 raw contract 确认前提前调查 distance/bucket。每次 rasterization 前记录 GaussianData/CameraData/config 的 shape、dtype、device、contiguous、finite 与数值范围，CUDA 同步成功后输出 `GS:SMOKE_PRE_RASTER_OK`；rasterization 后再次同步并记录返回 tuple。
 
 该诊断直接使用 framework loader 与真实 `gs_render`，不调用 Reconstruction，也不使用 mock renderer。未显式给出 pose config 时仍加载随代码提供的 V3.3 配置，以保持 raw-tail 40962 Skybox split 语义。可选的 `--include-use-bucket-false-ab` 仅增加两个 distance case 的诊断 A/B，不会修改 production adapter，也不能作为最终 workaround。
 
 ## 验证状态
 
-- 原有回归 + V3.3 专项单元测试：`74 passed, 2 skipped`。已移除依赖 fake tensor/mock renderer 的私有 backend contract 测试，真实 contract 由上述独立进程 smoke test 验证。
+- 原有回归 + V3.3 专项单元测试：`78 passed, 2 skipped`。新增 raw PLY storage、`gs_render` raw boundary 和 `gsplat` activated boundary 的 contract 回归测试；真实 CUDA rasterization contract 仍由上述独立进程 smoke test 验证。
 - 新增覆盖：hole 禁止 over-nominal、center guard/crossing、Coverage Consensus、360° 半开采样、raw PLY tail 40962 skybox、elevation center-out ordering与 planar-depth 数值测试。私有 renderer contract 不再由 mock 单元测试替代，改由真实环境中的独立进程 smoke test 验证。
 - V3.2 的 34-case 数字作为冻结基线记录于本文；本次代码环境未执行完整数据集批量渲染。正式接受 V3.3 前仍需在真实 `gs_render` 私有环境中验证 planar depth、geometry-only split、pano RGB/alpha/depth 对齐，并重跑 34-case 与高噪声专项 case。

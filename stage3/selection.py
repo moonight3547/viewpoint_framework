@@ -319,6 +319,7 @@ def select_views(
 def order_selected_views(
     selected: Sequence[SelectionCandidate],
     config: Optional[SelectionConfig] = None,
+    grid_row_bounds: Optional[tuple[int, int]] = None,
 ) -> List[SelectionCandidate]:
     config = config or SelectionConfig()
     selected = list(selected)
@@ -335,11 +336,37 @@ def order_selected_views(
             ),
         )
     if config.ordering_strategy == "elevation_center_out":
-        elevations = [float(c.elevation_deg) for c in selected
-                      if c.elevation_deg is not None and np.isfinite(c.elevation_deg)]
-        center = 0.5 * (min(elevations) + max(elevations)) if elevations else 0.0
+        # Preserve complete elevation rows.  Sorting every frame by absolute
+        # elevation distance interleaves the upper/lower rows at each azimuth.
+        rows = sorted({int(c.row) for c in selected if c.row is not None})
+        if rows:
+            bounds = grid_row_bounds or (rows[0], rows[-1])
+            midpoint = 0.5 * (int(bounds[0]) + int(bounds[1]))
+            middle = min(rows, key=lambda row: (abs(row-midpoint), row))
+            row_order = ([middle]
+                         + [row for row in rows if row > middle]
+                         + [row for row in reversed(rows) if row < middle])
+            row_rank = {row: rank for rank, row in enumerate(row_order)}
+            return sorted(selected, key=lambda c: (
+                row_rank.get(int(c.row), len(row_rank)) if c.row is not None else len(row_rank),
+                int(c.col) if c.col is not None else 10**9,
+                float(c.azimuth_deg) % 360.0 if c.azimuth_deg is not None else float("inf"),
+                c.candidate_id,
+            ))
+        elevations = sorted({float(c.elevation_deg) for c in selected
+                             if c.elevation_deg is not None
+                             and np.isfinite(c.elevation_deg)})
+        if not elevations:
+            return sorted(selected, key=lambda c: c.candidate_id)
+        midpoint = 0.5 * (elevations[0] + elevations[-1])
+        middle = min(elevations, key=lambda value: (abs(value-midpoint), value))
+        elevation_order = ([middle]
+                           + [value for value in elevations if value > middle]
+                           + [value for value in reversed(elevations) if value < middle])
+        elevation_rank = {value: rank for rank, value in enumerate(elevation_order)}
         return sorted(selected, key=lambda c: (
-            abs(float(c.elevation_deg)-center) if c.elevation_deg is not None else float("inf"),
+            elevation_rank.get(float(c.elevation_deg), len(elevation_rank))
+            if c.elevation_deg is not None else len(elevation_rank),
             float(c.azimuth_deg) % 360.0 if c.azimuth_deg is not None else float("inf"),
             c.candidate_id,
         ))

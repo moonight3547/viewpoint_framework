@@ -2,7 +2,11 @@
 from __future__ import annotations
 import numpy as np
 
-from viewpoint_framework.renderer.scene_loader import load_gaussian_scene_data
+from viewpoint_framework.renderer.scene_loader import (
+    activate_opacities,
+    activate_scales,
+    load_gaussian_scene_data,
+)
 from viewpoint_framework.renderer.types import GaussianRenderResult
 
 # ``render``: color, alpha, semantic, depth, normal, extra_data.
@@ -60,15 +64,20 @@ class GsRenderRenderer:
         self.device = str(device)
         self.scene_data = load_gaussian_scene_data(gaussian_ply, config)
         data = self.scene_data
+        # Geometry consumers work in physical units even though gs_render's
+        # tensor contract is the raw optimization representation.
+        actual_scales = activate_scales(data.scales, config.scale_activation)
+        actual_opacities = activate_opacities(
+            data.opacities, config.opacity_activation)
         self.geometry_means_np = data.geometry_means
-        self.geometry_scales_np = data.scales[data.geometry_mask]
-        self.geometry_opacities_np = data.opacities[data.geometry_mask]
+        self.geometry_scales_np = actual_scales[data.geometry_mask]
+        self.geometry_opacities_np = actual_opacities[data.geometry_mask]
         self.geometry_max_scale_np = np.max(self.geometry_scales_np, axis=1)
         self.means_np, self.scales_np = self.geometry_means_np, self.geometry_scales_np
         self.opacities_np, self.max_scale_np = self.geometry_opacities_np, self.geometry_max_scale_np
         self.skybox_means_np = data.skybox_means
-        self.skybox_scales_np = data.scales[data.skybox_mask]
-        self.skybox_opacities_np = data.opacities[data.skybox_mask]
+        self.skybox_scales_np = actual_scales[data.skybox_mask]
+        self.skybox_opacities_np = actual_opacities[data.skybox_mask]
         self.skybox_center, self.skybox_radius = data.skybox_center.copy(), float(data.skybox_radius)
         self.skybox_metadata = data.metadata["skybox"]
         self.source_path = data.metadata["source_path"]
@@ -80,6 +89,8 @@ class GsRenderRenderer:
 
     def _gaussian_data(self, mask):
         data = self.scene_data
+        # gs_render applies normalize/exp/sigmoid internally.  These tensors
+        # must therefore stay byte-for-byte in the PLY/raw representation.
         return self.module.GsRenderGaussianData(
             means=self._tensor(data.means[mask]), rotations=self._tensor(data.quats[mask]),
             scales=self._tensor(data.scales[mask]), opacitys=self._tensor(data.opacities[mask, None]),

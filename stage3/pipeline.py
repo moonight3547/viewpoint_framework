@@ -341,7 +341,10 @@ def run_stage3(
         config=config.selection,
         visibility_model=selection_model,
     )
-    selected = order_selected_views(selected, config.selection)
+    grid_rows = [int(c.row) for c in stage2_candidates if c.row is not None]
+    grid_row_bounds = ((min(grid_rows), max(grid_rows)) if grid_rows else None)
+    selected = order_selected_views(
+        selected, config.selection, grid_row_bounds=grid_row_bounds)
     selected_cameras = [c.camera for c in selected]
 
     # Reference selector can reuse the Gaussian visibility model already computed

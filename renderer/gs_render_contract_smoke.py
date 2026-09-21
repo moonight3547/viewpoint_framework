@@ -37,6 +37,10 @@ def build_argparser():
     parser.add_argument("--probe-max-dim", type=int, default=256)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--cases", nargs="+", choices=CASES, default=("full_render",),
+        help=("Cases to run in isolated processes. Defaults to full_render; "
+              "distance cases must be requested explicitly."))
     parser.add_argument("--include-use-bucket-false-ab", action="store_true",
                         help="Diagnostic only; never changes production configuration")
     parser.add_argument("--_worker-case", choices=CASES, default=None,
@@ -125,7 +129,10 @@ def _worker(args):
         "loader_policy": {
             "scale_activation": renderer_config.scale_activation,
             "opacity_activation": renderer_config.opacity_activation,
-            "tensor_representation": "activated",
+            "tensor_representation": "raw",
+            "quats": "raw_unnormalized",
+            "scales": "raw_log_scale",
+            "opacities": "raw_logit",
             "degree": int(renderer.scene_data.sh_degree),
             "full_count": int(len(renderer.scene_data.means)),
             "geometry_count": int(renderer.scene_data.geometry_mask.sum()),
@@ -176,7 +183,8 @@ def _child_command(args, case, use_bucket):
 def _supervisor(args):
     root = Path(args.output_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
-    runs = [(case, True) for case in CASES]
+    selected_cases = tuple(args.cases)
+    runs = [(case, True) for case in selected_cases]
     if args.include_use_bucket_false_ab:
         runs.extend((case, False) for case in ("geometry_distance", "probe_distance"))
     summary = []
@@ -199,7 +207,7 @@ def _supervisor(args):
         summary.append(row)
         print(f"[GS:SMOKE_CASE_RESULT] {label} {row['status']} rc={completed.returncode}",
               flush=True)
-    core = summary[:len(CASES)]
+    core = summary[:len(selected_cases)]
     first_failure = next((row["case"] for row in core if row["returncode"]), None)
     payload = {"cases": summary, "first_core_failure": first_failure,
                "all_core_passed": first_failure is None}

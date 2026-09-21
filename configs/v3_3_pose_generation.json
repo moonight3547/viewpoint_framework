@@ -43,7 +43,7 @@
   },
   "global_height": {
     "enabled": true,
-    "strategy": "coverage_consensus",
+    "strategy": "strict_local_intersection",
     "support_ratio": 0.85,
     "min_reliable_columns": 5,
     "fallback": "captured_height_range"

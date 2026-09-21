@@ -5,7 +5,12 @@ import numpy as np
 
 @dataclass
 class GaussianSceneData:
-    """Backend-independent activated Gaussian values and one canonical split."""
+    """Canonical PLY/raw Gaussian values and one backend-independent split.
+
+    ``quats`` are unnormalized optimization parameters, ``scales`` are log
+    scales, and ``opacities`` are logits.  Backends activate them at their API
+    boundary when their renderer contract requires activated values.
+    """
     means: np.ndarray
     quats: np.ndarray
     scales: np.ndarray

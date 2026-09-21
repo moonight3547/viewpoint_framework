@@ -10,7 +10,7 @@ from viewpoint_framework.pose_generation import (
 from viewpoint_framework.pose_generation_v3 import initial_position_from_rho
 from viewpoint_framework.scene_types import CameraMode, to_jsonable
 from viewpoint_framework.stage2.height import (
-    coverage_consensus, effective_height, probe_local_height,
+    effective_height, probe_local_height, resolve_global_height,
     unavailable_local, clip_radius_to_height_limit,
 )
 from viewpoint_framework.stage2.radius import (
@@ -81,10 +81,9 @@ def generate_v33_candidates(captured_cameras, profile, bbox, view_limits, grid,
         )
         local_results[azimuth].source = prior.height_source
 
-    global_height = coverage_consensus(
+    global_height = resolve_global_height(
         list(local_results.values()), trajectory.captured_heights,
-        config.global_height.support_ratio, config.global_height.min_reliable_columns,
-    )
+        config.global_height)
     effective = {az: effective_height(local, global_height)
                  for az, local in local_results.items()}
     captured_max = float(np.max(np.hypot(

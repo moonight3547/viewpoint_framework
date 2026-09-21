@@ -4,7 +4,9 @@ import pytest
 
 from viewpoint_framework.scene_types import CircularInterval
 from viewpoint_framework.skybox_detection import SkyboxDetectionConfig, detect_skybox_gaussians
-from viewpoint_framework.stage2.height import LocalHeightV33, RobustSide, coverage_consensus
+from viewpoint_framework.stage2.height import (
+    LocalHeightV33, RobustSide, coverage_consensus, strict_global_height,
+)
 from viewpoint_framework.stage2.radius import classify_inside_signed_radius, resolve_radius_targets
 from viewpoint_framework.stage3.selection import SelectionConfig, order_selected_views
 from viewpoint_framework.view_space import sample_circular_interval
@@ -64,16 +66,33 @@ def test_tail_40962_strict_sphere_detection_uses_raw_order():
     assert np.all(result.skybox_mask[2:])
 
 
-def test_elevation_center_out_ordering():
+def test_elevation_center_out_ordering_keeps_complete_rows():
     class Candidate:
-        def __init__(self, ident, elevation, azimuth):
+        def __init__(self, ident, row, col, elevation, azimuth):
             self.candidate_id = ident
+            self.row = row
+            self.col = col
             self.elevation_deg = elevation
             self.azimuth_deg = azimuth
-    values = [Candidate(0, -20., 0.), Candidate(1, 0., 20.), Candidate(2, 20., 10.)]
+    values = [
+        Candidate(0, 0, 0, -40., 0.),
+        Candidate(1, 1, 0, -20., 0.),
+        Candidate(2, 2, 1, 0., 20.),
+        Candidate(3, 2, 0, 0., 0.),
+        Candidate(4, 3, 0, 20., 0.),
+    ]
     ordered = order_selected_views(
-        values, SelectionConfig(ordering_strategy="elevation_center_out"))
-    assert [x.candidate_id for x in ordered] == [1, 0, 2]
+        values, SelectionConfig(ordering_strategy="elevation_center_out"),
+        grid_row_bounds=(0, 4))
+    assert [x.candidate_id for x in ordered] == [3, 2, 4, 1, 0]
+
+
+def test_strict_global_height_intersects_all_reliable_columns():
+    result = strict_global_height(
+        [_local(0, -2., 3.), _local(1, -1., 2.), _local(2, -3., 4.)],
+        [-.5, 0., .5])
+    assert result.strategy == "strict_local_intersection"
+    assert result.height_min == -1. and result.height_max == 2.
 
 
 def test_compute_plane_depth_returns_camera_z_depth():

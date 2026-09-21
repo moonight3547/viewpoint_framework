@@ -11,9 +11,33 @@ def _sorted(names, prefix):
                   key=lambda name: int(name[len(prefix):]))
 
 
-def _sigmoid(values):
-    values = np.clip(values, -30., 30.)
-    return 1. / (1. + np.exp(-values))
+def activate_scales(values, activation="exp"):
+    values = np.asarray(values, dtype=np.float32)
+    if activation == "exp":
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.exp(values).astype(np.float32, copy=False)
+    if activation == "identity":
+        return values.copy()
+    raise ValueError(f"Unknown scale_activation={activation}")
+
+
+def activate_opacities(values, activation="sigmoid"):
+    values = np.asarray(values, dtype=np.float32)
+    if activation == "identity":
+        return values.copy()
+    if activation != "sigmoid":
+        raise ValueError(f"Unknown opacity_activation={activation}")
+    output = np.empty_like(values)
+    positive = values >= 0
+    output[positive] = 1. / (1. + np.exp(-values[positive]))
+    exp_values = np.exp(values[~positive])
+    output[~positive] = exp_values / (1. + exp_values)
+    return output
+
+
+def normalize_quaternions(values):
+    values = np.asarray(values, dtype=np.float32)
+    return values / np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-8)
 
 
 def load_gaussian_scene_data(gaussian_ply, config):
@@ -38,15 +62,6 @@ def load_gaussian_scene_data(gaussian_ply, config):
     scales = np.stack([vertex[f"scale_{i}"] for i in range(3)], 1).astype(np.float32)
     quats = np.stack([vertex[f"rot_{i}"] for i in range(4)], 1).astype(np.float32)
     opacities = np.asarray(vertex["opacity"], dtype=np.float32)
-    if config.scale_activation == "exp":
-        scales = np.exp(np.clip(scales, -20., 20.))
-    elif config.scale_activation != "identity":
-        raise ValueError(f"Unknown scale_activation={config.scale_activation}")
-    if config.opacity_activation == "sigmoid":
-        opacities = _sigmoid(opacities).astype(np.float32)
-    elif config.opacity_activation != "identity":
-        raise ValueError(f"Unknown opacity_activation={config.opacity_activation}")
-    quats /= np.maximum(np.linalg.norm(quats, axis=1, keepdims=True), 1e-8)
     dc_names, rest_names = _sorted(names, "f_dc_"), _sorted(names, "f_rest_")
     dc = np.stack([vertex[name] for name in dc_names[:3]], 1).astype(np.float32)[:, None, :]
     if rest_names and len(rest_names) % 3 == 0:
@@ -61,11 +76,16 @@ def load_gaussian_scene_data(gaussian_ply, config):
     if config.max_sh_degree is not None:
         degree = min(degree, int(config.max_sh_degree))
         rest = rest[:, :((degree+1)**2-1), :]
-    # Detection sees raw ordering and activated scale values.
-    detection = detect_skybox_gaussians(means, scales, config.skybox)
+    # Canonical arrays remain raw.  Skybox classification alone needs physical
+    # scale, so activation is local and never written back to ``scales``.
+    actual_scales = activate_scales(scales, config.scale_activation)
+    actual_opacities = activate_opacities(opacities, config.opacity_activation)
+    detection = detect_skybox_gaussians(means, actual_scales, config.skybox)
     finite = (np.all(np.isfinite(means), 1) & np.all(np.isfinite(scales), 1)
               & np.all(np.isfinite(quats), 1) & np.isfinite(opacities)
-              & (opacities > 1e-6) & np.all(np.isfinite(dc), (1, 2))
+              & np.all(np.isfinite(actual_scales), 1)
+              & np.isfinite(actual_opacities) & (actual_opacities > 1e-6)
+              & np.all(np.isfinite(dc), (1, 2))
               & np.all(np.isfinite(rest), (1, 2)))
     skybox = detection.skybox_mask[finite]
     geometry = ~skybox
@@ -75,5 +95,11 @@ def load_gaussian_scene_data(gaussian_ply, config):
         means[finite], quats[finite], scales[finite], opacities[finite],
         dc[finite], rest[finite], degree, geometry, skybox,
         detection.skybox_center.astype(np.float64), float(detection.skybox_radius),
-        {"source_path": str(path), "skybox": detection.diagnostics},
+        {"source_path": str(path), "skybox": detection.diagnostics,
+         "representation": {"quats": "raw", "scales": "log",
+                            "opacities": "logit"}},
     )
+
+
+__all__ = ["load_gaussian_scene_data", "activate_scales",
+           "activate_opacities", "normalize_quaternions"]

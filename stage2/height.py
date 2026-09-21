@@ -178,6 +178,40 @@ def coverage_consensus(local_results, captured_heights, support_ratio=.85, min_r
                            n, required, len(bands), len(bands) > 1, bands)
 
 
+def strict_global_height(local_results, captured_heights):
+    """Conservative common intersection of all reliable local intervals."""
+    captured = np.asarray(captured_heights, dtype=np.float64)
+    captured = captured[np.isfinite(captured)]
+    if not len(captured):
+        raise ValueError("Global height requires captured heights.")
+    intervals = [r.reliable_interval for r in local_results
+                 if r.reliable_interval is not None]
+    n = len(intervals)
+    if intervals:
+        lo = max(interval[0] for interval in intervals)
+        hi = min(interval[1] for interval in intervals)
+        if lo < hi:
+            return GlobalHeightV33(
+                float(lo), float(hi), "strict_local_intersection", 1.0,
+                n, n, 1, False, [(float(lo), float(hi))])
+        strategy = "strict_conflict_captured_fallback"
+    else:
+        strategy = "strict_empty_captured_fallback"
+    return GlobalHeightV33(
+        float(captured.min()), float(captured.max()), strategy, 1.0,
+        n, n, 0, False, [])
+
+
+def resolve_global_height(local_results, captured_heights, config):
+    if config.strategy == "strict_local_intersection":
+        return strict_global_height(local_results, captured_heights)
+    if config.strategy == "coverage_consensus":
+        return coverage_consensus(
+            local_results, captured_heights,
+            config.support_ratio, config.min_reliable_columns)
+    raise ValueError(f"Unsupported global-height strategy: {config.strategy}")
+
+
 def effective_height(local, global_height):
     interval = local.reliable_interval
     if interval is None:
@@ -186,5 +220,6 @@ def effective_height(local, global_height):
     return EffectiveHeightLimits(interval[0], interval[1], "local", "local")
 
 
-__all__ = ["probe_local_height", "coverage_consensus", "effective_height",
+__all__ = ["probe_local_height", "coverage_consensus", "strict_global_height",
+           "resolve_global_height", "effective_height",
            "unavailable_local", "clip_radius_to_height_limit", "HeightClipResult"]

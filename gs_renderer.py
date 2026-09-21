@@ -15,16 +15,18 @@ Camera convention follows :mod:`viewpoint_framework.cameras_util`:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
-from viewpoint_framework.skybox_detection import (
-    SkyboxDetectionConfig,
-    detect_skybox_gaussians,
+from viewpoint_framework.skybox_detection import SkyboxDetectionConfig
+from viewpoint_framework.renderer.types import GaussianRenderResult
+from viewpoint_framework.renderer.scene_loader import (
+    activate_opacities,
+    activate_scales,
+    load_gaussian_scene_data,
+    normalize_quaternions,
 )
-from viewpoint_framework.renderer.types import GaussianRenderResult, GaussianSceneData
 
 
 @dataclass
@@ -79,7 +81,6 @@ class GsplatRenderer:
         try:
             import torch
             from gsplat.rendering import rasterization
-            from plyfile import PlyData
         except ImportError as exc:
             raise ImportError(
                 "GsplatRenderer requires torch, gsplat and plyfile. "
@@ -88,144 +89,31 @@ class GsplatRenderer:
 
         self.torch = torch
         self.rasterization = rasterization
-        self.PlyData = PlyData
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = str(device)
         self._load_gaussians(gaussian_ply)
 
-    @staticmethod
-    def _sigmoid_numpy(x: np.ndarray) -> np.ndarray:
-        x = np.clip(x, -30.0, 30.0)
-        return 1.0 / (1.0 + np.exp(-x))
-
-    @staticmethod
-    def _sorted_property_names(names: Sequence[str], prefix: str) -> list[str]:
-        items = [name for name in names if name.startswith(prefix)]
-
-        def key(name: str) -> int:
-            try:
-                return int(name[len(prefix):])
-            except ValueError:
-                return 10**9
-
-        return sorted(items, key=key)
-
     def _load_gaussians(self, gaussian_ply: str) -> None:
-        path = Path(gaussian_ply).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"3DGS PLY does not exist: {path}")
+        data = load_gaussian_scene_data(gaussian_ply, self.config)
+        self.scene_data = data
+        means = data.means
+        # gsplat consumes activated values, unlike gs_render.  Activation is
+        # deliberately confined to this backend boundary.
+        scales = activate_scales(data.scales, self.config.scale_activation)
+        opacities = activate_opacities(
+            data.opacities, self.config.opacity_activation)
+        quats = normalize_quaternions(data.quats)
+        colors_np = data.features
+        geometry_mask = data.geometry_mask
+        skybox_mask = data.skybox_mask
 
-        ply = self.PlyData.read(str(path))
-        if "vertex" not in ply:
-            raise ValueError(f"PLY has no vertex element: {path}")
-        vertex = ply["vertex"].data
-        names = list(vertex.dtype.names or ())
-        name_set = set(names)
-
-        required = {
-            "x", "y", "z", "opacity",
-            "scale_0", "scale_1", "scale_2",
-            "rot_0", "rot_1", "rot_2", "rot_3",
-        }
-        missing = sorted(required - name_set)
-        if missing:
-            raise ValueError(
-                "3DGS PLY is missing geometry properties: " + ", ".join(missing)
-            )
-
-        means = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float32)
-        scales = np.stack(
-            [vertex["scale_0"], vertex["scale_1"], vertex["scale_2"]], axis=1
-        ).astype(np.float32)
-        quats = np.stack(
-            [vertex["rot_0"], vertex["rot_1"], vertex["rot_2"], vertex["rot_3"]],
-            axis=1,
-        ).astype(np.float32)
-        opacities = np.asarray(vertex["opacity"], dtype=np.float32)
-
-        if self.config.scale_activation == "exp":
-            scales = np.exp(np.clip(scales, -20.0, 20.0))
-        elif self.config.scale_activation != "identity":
-            raise ValueError(f"Unknown scale_activation={self.config.scale_activation}")
-
-        if self.config.opacity_activation == "sigmoid":
-            opacities = self._sigmoid_numpy(opacities)
-        elif self.config.opacity_activation != "identity":
-            raise ValueError(f"Unknown opacity_activation={self.config.opacity_activation}")
-
-        quat_norm = np.linalg.norm(quats, axis=1, keepdims=True)
-        quats = quats / np.maximum(quat_norm, 1e-8)
-
-        # Standard 3DGS SH property layout.  When unavailable we still support
-        # depth/alpha rendering and emit a neutral gray RGB fallback.
-        dc_names = self._sorted_property_names(names, "f_dc_")
-        rest_names = self._sorted_property_names(names, "f_rest_")
-        sh_coeffs = None
-        sh_degree = None
-        if len(dc_names) >= 3:
-            dc = np.stack([vertex[name] for name in dc_names[:3]], axis=1).astype(np.float32)
-            dc = dc[:, None, :]  # N,1,3
-            if rest_names and len(rest_names) % 3 == 0:
-                rest_flat = np.stack([vertex[name] for name in rest_names], axis=1).astype(np.float32)
-                # Original 3DGS PLY flattens [3, Krest] after transpose.
-                k_rest = len(rest_names) // 3
-                rest = rest_flat.reshape(len(rest_flat), 3, k_rest).transpose(0, 2, 1)
-                sh_coeffs = np.concatenate([dc, rest], axis=1)
-            else:
-                sh_coeffs = dc
-
-            k = int(sh_coeffs.shape[1])
-            inferred = int(round(np.sqrt(k) - 1))
-            if (inferred + 1) ** 2 != k:
-                inferred = 0
-                sh_coeffs = dc
-            if self.config.max_sh_degree is not None:
-                inferred = min(inferred, int(self.config.max_sh_degree))
-                keep = (inferred + 1) ** 2
-                sh_coeffs = sh_coeffs[:, :keep]
-            sh_degree = inferred
-
-        # Skybox tail detection must see the unfiltered raw PLY order.  The
-        # resulting mask is filtered only after classification.
-        raw_detection = detect_skybox_gaussians(means, scales, self.config.skybox)
-        finite = (
-            np.all(np.isfinite(means), axis=1)
-            & np.all(np.isfinite(scales), axis=1)
-            & np.all(np.isfinite(quats), axis=1)
-            & np.isfinite(opacities)
-            & (opacities > 1e-6)
-        )
-        if sh_coeffs is not None:
-            finite &= np.all(np.isfinite(sh_coeffs), axis=(1, 2))
-
-        means = means[finite]
-        scales = scales[finite]
-        quats = quats[finite]
-        opacities = opacities[finite]
-        if sh_coeffs is not None:
-            sh_coeffs = sh_coeffs[finite]
-        if len(means) == 0:
-            raise ValueError(f"No valid Gaussians found in {path}")
-
-        detection = raw_detection
-        skybox_mask = detection.skybox_mask[finite]
-        geometry_mask = ~skybox_mask
-        if not np.any(geometry_mask):
-            raise ValueError("Skybox detector removed every Gaussian; refusing unsafe classification.")
-
-        if sh_coeffs is None:
-            colors_np = np.full((len(means), 3), 0.5, dtype=np.float32)
-            sh_degree = None
-        else:
-            colors_np = sh_coeffs
-
-        self.source_path = str(path)
-        self.skybox_metadata = detection.diagnostics
-        self.skybox_center = detection.skybox_center.astype(np.float64)
-        self.skybox_radius = float(detection.skybox_radius)
+        self.source_path = data.metadata["source_path"]
+        self.skybox_metadata = data.metadata["skybox"]
+        self.skybox_center = data.skybox_center.copy()
+        self.skybox_radius = float(data.skybox_radius)
         self.skybox_mask_np = skybox_mask.copy()
-        self.sh_degree = sh_degree
+        self.sh_degree = int(data.sh_degree)
 
         # Compatibility names intentionally mean geometry-only in V3.1. This
         # makes legacy Stage-3 sampling safe even before callers migrate to the
@@ -242,17 +130,6 @@ class GsplatRenderer:
         self.skybox_means_np = means[skybox_mask]
         self.skybox_scales_np = scales[skybox_mask]
         self.skybox_opacities_np = opacities[skybox_mask]
-        self.scene_data = GaussianSceneData(
-            means, quats, scales, opacities,
-            (colors_np[:, :1, :] if colors_np.ndim == 3 else colors_np[:, None, :]),
-            (colors_np[:, 1:, :] if colors_np.ndim == 3 else
-             np.empty((len(colors_np), 0, 3), dtype=np.float32)),
-            int(sh_degree or 0),
-            geometry_mask.copy(), skybox_mask.copy(),
-            self.skybox_center.copy(), self.skybox_radius,
-            {"source_path": self.source_path, "skybox": self.skybox_metadata},
-        )
-
         torch = self.torch
         # Store disjoint groups: there is no permanent full + geometry duplicate.
         self.means = torch.from_numpy(means[geometry_mask]).to(self.device)
