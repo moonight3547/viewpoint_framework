@@ -334,7 +334,7 @@ class GsplatRenderer:
                 height=height,
                 render_mode=render_mode,
                 sh_degree=self.sh_degree,
-                backgrounds=bg[None],
+                backgrounds=None, #bg[None],
                 near_plane=float(self.config.near_plane),
             )
 

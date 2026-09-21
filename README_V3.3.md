@@ -103,8 +103,25 @@ python -m viewpoint_framework.visualization.candidate_placements `
 
 visualizer 支持 V3.2/V3.3 metadata，显示 scene center、Global/Local Height、缩小后的 camera frustum，以及 radius/crossing/hole diagnostics hover。frustum 默认基于 median captured rho，而不是 point-cloud extent。
 
+## `gs_render` contract smoke test
+
+针对首次 Stage2 depth probe 的 CUDA illegal memory access，新增真实私有 backend 隔离脚本：
+
+```bash
+python -m viewpoint_framework.renderer.gs_render_contract_smoke \
+  --gaussian-ply <scene.ply> \
+  --cameras <cameras.json> \
+  --pose-config-json viewpoint_framework/configs/v3_3_pose_generation.json \
+  --camera-index 0 --probe-max-dim 256 --device cuda \
+  --output-dir <output>/gs_render_contract_smoke
+```
+
+脚本依次在五个独立 Python 进程中测试 `full+render`、`geometry-only+render`、`geometry-only+render_with_distance`、`probe-resized+render` 和 `probe-resized+render_with_distance`。每次 rasterization 前记录 GaussianData/CameraData/config 的 shape、dtype、device、contiguous、finite 与数值范围，CUDA 同步成功后输出 `GS:SMOKE_PRE_RASTER_OK`；rasterization 后再次同步并记录返回 tuple。这样某个 case 的 illegal memory access 不会污染后续 case，`summary.json` 会标出第一个失败的核心组合。
+
+该诊断直接使用 framework loader 与真实 `gs_render`，不调用 Reconstruction，也不使用 mock renderer。未显式给出 pose config 时仍加载随代码提供的 V3.3 配置，以保持 raw-tail 40962 Skybox split 语义。可选的 `--include-use-bucket-false-ab` 仅增加两个 distance case 的诊断 A/B，不会修改 production adapter，也不能作为最终 workaround。
+
 ## 验证状态
 
-- 原有回归 + V3.3 专项单元测试：`82 passed, 2 skipped`。
-- 新增覆盖：hole 禁止 over-nominal、center guard/crossing、Coverage Consensus、360° 半开采样、raw PLY tail 40962 skybox、elevation center-out ordering、renderer backend/runtime failure contract，以及 import-success 后禁止 fallback。planar-depth 数值测试在安装 PyTorch 的环境执行，当前测试环境因此 skip。
+- 原有回归 + V3.3 专项单元测试：`74 passed, 2 skipped`。已移除依赖 fake tensor/mock renderer 的私有 backend contract 测试，真实 contract 由上述独立进程 smoke test 验证。
+- 新增覆盖：hole 禁止 over-nominal、center guard/crossing、Coverage Consensus、360° 半开采样、raw PLY tail 40962 skybox、elevation center-out ordering与 planar-depth 数值测试。私有 renderer contract 不再由 mock 单元测试替代，改由真实环境中的独立进程 smoke test 验证。
 - V3.2 的 34-case 数字作为冻结基线记录于本文；本次代码环境未执行完整数据集批量渲染。正式接受 V3.3 前仍需在真实 `gs_render` 私有环境中验证 planar depth、geometry-only split、pano RGB/alpha/depth 对齐，并重跑 34-case 与高噪声专项 case。
