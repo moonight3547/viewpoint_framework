@@ -49,12 +49,13 @@ def render_camera_sequence(
     prefix: str = "frame",
     alpha_dir: Path | None = None,
     depth_dir: Path | None = None,
+    max_image_dim: int | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, camera in enumerate(cameras):
         result = renderer.render_geometry(
-            camera, max_image_dim=None, need_rgb=True, need_alpha=True,
+            camera, max_image_dim=max_image_dim, need_rgb=True, need_alpha=True,
             need_depth=depth_dir is not None)
         rgb = result.rgb
         path = output_dir / f"{prefix}_{i:04d}.png"
@@ -67,6 +68,30 @@ def render_camera_sequence(
                     np.asarray(result.depth, dtype=np.float32))
         paths.append(str(path))
     return paths
+
+
+def build_frame_manifest(result: Stage3Result) -> list[dict]:
+    """Return a stable frame-to-candidate mapping for backend comparisons."""
+    if len(result.selected_candidates) != len(result.selected_cameras):
+        raise ValueError(
+            "selected_candidates and selected_cameras must have identical lengths")
+    rows = []
+    for output_index, (candidate, camera) in enumerate(zip(
+            result.selected_candidates, result.selected_cameras)):
+        rows.append({
+            "output_index": output_index,
+            "image": f"frame_{output_index:04d}.png",
+            "candidate_id": int(candidate.candidate_id),
+            "grid_id": None if candidate.grid_id is None else int(candidate.grid_id),
+            "row": None if candidate.row is None else int(candidate.row),
+            "col": None if candidate.col is None else int(candidate.col),
+            "azimuth_deg": candidate.azimuth_deg,
+            "elevation_deg": candidate.elevation_deg,
+            "signed_radius": candidate.signed_radius,
+            "camera_index": int(camera.index),
+            "camera": to_jsonable(camera),
+        })
+    return rows
 
 
 def save_stage3_outputs(
@@ -83,6 +108,7 @@ def save_stage3_outputs(
     root.mkdir(parents=True, exist_ok=True)
 
     pano_cameras_path = root / "pano_cameras.json"
+    frame_manifest_path = root / "pano_frame_manifest.json"
     pano_images_dir = root / "pano_images"
     pano_alphas_dir = root / "pano_alphas" if geometry_output_contract else None
     pano_depths_dir = (root / "pano_depths"
@@ -91,6 +117,8 @@ def save_stage3_outputs(
     traj_lens_path = root / "traj_lens.json"
 
     save_cameras_json(result.selected_cameras, str(pano_cameras_path))
+    with open(frame_manifest_path, "w", encoding="utf-8") as f:
+        json.dump(build_frame_manifest(result), f, indent=2)
     if geometry_output_contract:
         render_camera_sequence(renderer, result.selected_cameras, pano_images_dir,
                                prefix="frame", alpha_dir=pano_alphas_dir,
@@ -117,6 +145,7 @@ def save_stage3_outputs(
 
     paths = {
         "pano_cameras": str(pano_cameras_path),
+        "pano_frame_manifest": str(frame_manifest_path),
         "pano_images": str(pano_images_dir),
         "traj_refs": str(traj_refs_path),
         "traj_lens": str(traj_lens_path),
@@ -160,3 +189,6 @@ def save_stage3_outputs(
 
 if __name__ == "__main__":
     print("stage3.render_output: import OK; runtime rendering requires a GsplatRenderer.")
+
+
+__all__ = ["build_frame_manifest", "render_camera_sequence", "save_stage3_outputs"]

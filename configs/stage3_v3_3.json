@@ -1,6 +1,7 @@
 {
   "num_panos": 49,
   "num_refs": 12,
+  "output_all_stage2_candidates": true,
   "debug_mode": false,
   "render_pano_depths": false,
   "geometry_output_contract": true,

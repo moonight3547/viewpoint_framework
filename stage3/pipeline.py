@@ -53,6 +53,7 @@ EPS = 1e-8
 class Stage3Config:
     num_panos: int = 49
     num_refs: int = 12
+    output_all_stage2_candidates: bool = False
     debug_mode: bool = False
     render_pano_depths: bool = False
     geometry_output_contract: bool = False
@@ -239,6 +240,10 @@ def run_stage3(
     captured_cameras = list(captured_cameras)
     if not stage2_candidates:
         raise ValueError("Stage 3 requires at least one Stage-2 valid candidate.")
+    if config.output_all_stage2_candidates and config.holes.strategy != "none":
+        raise ValueError(
+            "output_all_stage2_candidates requires holes.strategy='none' so the "
+            "output is an exact, one-to-one Stage-2 candidate sequence.")
 
     scene_scale = estimate_scene_scale(point_cloud_points, captured_cameras, scene_center)
     selected_views = load_selected_view_set(
@@ -273,7 +278,7 @@ def run_stage3(
         raise ValueError(f"Unknown hole strategy: {config.holes.strategy}")
 
     ig_strategy = config.selection.information_gain_strategy
-    if ig_strategy == "none":
+    if config.output_all_stage2_candidates or ig_strategy == "none":
         selection_model: VisibilityModel = NullVisibilityModel()
     elif ig_strategy == "gaussian_visibility" and shared_gaussian_model is not None:
         selection_model = shared_gaussian_model
@@ -331,18 +336,32 @@ def run_stage3(
 
     all_candidates = list(stage2_candidates) + list(hole_views)
 
-    selected, selection_debug = select_views(
-        all_candidates,
-        num_panos=config.num_panos,
-        captured_seed_cameras=anchor_cameras,
-        scene_center=scene_center,
-        scene_scale=scene_scale,
-        mode=mode,
-        config=config.selection,
-        visibility_model=selection_model,
-    )
     grid_rows = [int(c.row) for c in stage2_candidates if c.row is not None]
     grid_row_bounds = ((min(grid_rows), max(grid_rows)) if grid_rows else None)
+    if config.output_all_stage2_candidates:
+        # Backend-alignment mode: preserve every Stage-2 valid grid candidate.
+        # Only the normal V3.3 output ordering is applied; FPS, information gain,
+        # near-duplicate removal and num_panos are intentionally bypassed.
+        selected = list(stage2_candidates)
+        for candidate in selected:
+            candidate.selected = True
+        selection_debug = {
+            "strategy": "all_stage2_candidates",
+            "input_count": len(stage2_candidates),
+            "output_count": len(selected),
+            "num_panos_ignored": int(config.num_panos),
+        }
+    else:
+        selected, selection_debug = select_views(
+            all_candidates,
+            num_panos=config.num_panos,
+            captured_seed_cameras=anchor_cameras,
+            scene_center=scene_center,
+            scene_scale=scene_scale,
+            mode=mode,
+            config=config.selection,
+            visibility_model=selection_model,
+        )
     selected = order_selected_views(
         selected, config.selection, grid_row_bounds=grid_row_bounds)
     selected_cameras = [c.camera for c in selected]

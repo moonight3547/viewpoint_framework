@@ -53,8 +53,15 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--num_refs", type=int, default=12)
     p.add_argument("--debug-mode", action="store_true")
     p.add_argument("--device", default="auto")
+    p.add_argument(
+        "--renderer-backend", choices=("auto", "gs_render", "gsplat"), default=None,
+        help="Override renderer.backend without changing any other pose setting.")
     p.add_argument("--pointcloud_max_points", type=int, default=0)
     p.add_argument("--render-pano-depths", action="store_true")
+    p.add_argument(
+        "--all-generated-frames", action="store_true",
+        help=("Stage 3 outputs every valid Stage-2 grid candidate in the configured "
+              "V3.3 ordering; bypasses selection/downsampling."))
 
     # Stage-2 high-value overrides.
     p.add_argument("--mode", choices=("auto", "outside_in", "inside_out"), default="auto")
@@ -100,6 +107,8 @@ def _build_configs(args):
         pose_cfg.elevation_step_deg = float(args.grid_gap)
     if args.focal_ratio is not None:
         pose_cfg.focal_ratio = float(args.focal_ratio)
+    if args.renderer_backend is not None:
+        pose_cfg.renderer.backend = args.renderer_backend
 
     stage3_cfg = Stage3Config()
     if args.stage3_config_json:
@@ -112,6 +121,8 @@ def _build_configs(args):
     stage3_cfg.geometry_output_contract = bool(
         stage3_cfg.geometry_output_contract
         or str(pose_cfg.version).startswith("3.3"))
+    if args.all_generated_frames:
+        stage3_cfg.output_all_stage2_candidates = True
     if args.selection_strategy:
         stage3_cfg.selection.strategy = args.selection_strategy
     if args.selection_reference:
@@ -232,7 +243,9 @@ def main() -> None:
     print(f"Crossing capped     : {pose_result.diagnostics.get('inside_out_crossing_radius_capped_count', 0)}")
     print(f"Crossing fallback   : {pose_result.diagnostics.get('inside_out_crossing_fallback_initial_count', 0)}")
     print(f"GS geometry/skybox  : {len(renderer.geometry_means_np)} / {len(renderer.skybox_means_np)}")
-    print(f"Stage 3 panos       : {len(stage3_result.selected_cameras)} / {stage3_cfg.num_panos}")
+    pano_target = ("all Stage-2 valid" if stage3_cfg.output_all_stage2_candidates
+                   else str(stage3_cfg.num_panos))
+    print(f"Stage 3 panos       : {len(stage3_result.selected_cameras)} / {pano_target}")
     print(f"Stage 3 refs        : {len(stage3_result.reference_result.original_indices)} / {stage3_cfg.num_refs}")
     print("-- Stage 2 --")
     for key, value in stage2_paths.items():

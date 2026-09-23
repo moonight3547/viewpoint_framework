@@ -12,7 +12,14 @@ from viewpoint_framework.stage3.reference_selection import (
     legacy_global_fps,
     target_coverage_greedy,
 )
-from viewpoint_framework.stage3.types import CandidateOrigin, SelectionCandidate, SelectedViewSet
+from viewpoint_framework.stage3.render_output import build_frame_manifest
+from viewpoint_framework.stage3.types import (
+    CandidateOrigin,
+    ReferenceSelectionResult,
+    SelectionCandidate,
+    SelectedViewSet,
+    Stage3Result,
+)
 from viewpoint_framework.stage3.visibility import NullVisibilityModel
 from viewpoint_framework.scene_types import CameraMode
 
@@ -109,6 +116,41 @@ def test_target_coverage_greedy_size():
         config=ReferenceSelectionConfig(strategy="target_coverage_greedy"),
     )
     assert len(result.original_indices) == 2
+
+
+def test_frame_manifest_keeps_stable_grid_and_camera_mapping():
+    candidates = []
+    cameras = []
+    for output_index, grid_id in enumerate((17, 42)):
+        camera = make_camera(100 + output_index, [output_index, 0, 2], [0, 0, -1])
+        cameras.append(camera)
+        candidates.append(SelectionCandidate(
+            candidate_id=8 + output_index,
+            camera=camera,
+            origin=CandidateOrigin.GRID,
+            grid_id=grid_id,
+            row=output_index,
+            col=3,
+            azimuth_deg=20. * output_index,
+            elevation_deg=0.,
+            observation_direction=np.array([0., 0., 1.]),
+            signed_radius=2. + output_index,
+        ))
+    result = Stage3Result(
+        selected_candidates=candidates,
+        selected_cameras=cameras,
+        reference_result=ReferenceSelectionResult("test", [], []),
+        all_candidates=candidates,
+        holes=[],
+        hole_views=[],
+    )
+
+    rows = build_frame_manifest(result)
+
+    assert [row["image"] for row in rows] == ["frame_0000.png", "frame_0001.png"]
+    assert [row["grid_id"] for row in rows] == [17, 42]
+    assert [row["camera_index"] for row in rows] == [100, 101]
+    np.testing.assert_allclose(rows[1]["camera"]["c2w"], cameras[1].c2w)
 
 
 def test_pointcloud_gaussian_gap_finds_missing_support_cluster():

@@ -64,15 +64,43 @@ Skybox split 发生在任何 finite filtering 之前，因此 tail 语义不会�
 - `gs_render` / `gsplat`：仅尝试指定 backend。
 - backend 一旦选定，render 过程绝不切换；rasterization 异常统一为 `Renderer Rasterization Failure`。
 
-`gs_render` adapter 直接构造 `GsRenderGaussianData`、`GsRenderCameraData` 和 `GsRenderConfigData`。RGB/alpha-only 请求调用 `GsRenderer.render`；需要 depth 时调用 `GsRenderer.render_with_distance`，再通过 `compute_plane_depth(normal, distance, camera)` 转换为统一的 camera-space planar/Z depth。两条路径都从返回 tuple 的 index 1 读取 alpha，index 2 为可选 semantics。console 会输出 backend 与 version。`GaussianSceneData` 保存激活后的完整 Gaussian arrays、quaternion/features、唯一的 geometry/skybox mask、`skybox_center/radius` 与 metadata。V3.3 配置显式使用黑色 background，`clamp_color_min=false`。
+`gs_render` adapter 直接构造 `GsRenderGaussianData`、`GsRenderCameraData` 和 `GsRenderConfigData`。RGB/alpha-only 请求调用 `GsRenderer.render`；需要 depth 时调用 `GsRenderer.render_with_distance`，再通过 `compute_plane_depth(normal, distance, camera)` 转换为统一的 camera-space planar/Z depth。两条路径都从返回 tuple 的 index 1 读取 alpha，index 2 为可选 semantics。console 会输出 backend 与 version。`GaussianSceneData` 保存 PLY/raw optimization arrays：未归一化 quaternion、log-scale 和 opacity logits；`gs_render` 原样接收 raw tensors，`gsplat` 在自身 backend 边界执行 normalize/exp/sigmoid。V3.3 配置显式使用黑色 background，`clamp_color_min=false`。
 
 Stage3 每个最终相机只进行一次 geometry-only unified render，并输出：
 
 - `pano_images/frame_XXXX.png`：geometry-only RGB；
 - `pano_alphas/frame_XXXX.png`：geometry-only 单通道 uint8 alpha；
 - 可选 `pano_depths/frame_XXXX.npy`：float32 camera-Z planar depth，0 表示 invalid，并带 `depth_meta.json`。
+- `pano_frame_manifest.json`：稳定记录 output index 到 candidate/grid/row/column/camera matrix 的对应，用于 `gsplat` 和 `gs_render` 按 grid id 逐帧对齐。
 
 新增 `--render-pano-depths`。Stage3 baseline 关闭 focused hole views，并提供 `elevation_center_out` 输出顺序：先完整输出最接近 elevation midpoint 的 grid row，再依次完整输出向上的 rows，最后依次完整输出向下的 rows；每一行严格按 circular grid column 排列，最后才使用 stable candidate id 打破平局。
+
+`configs/stage3_v3_3.json` 当前开启 `output_all_stage2_candidates=true`：Stage3 跳过 FPS/coverage、near-duplicate filter 和 `num_panos` 降采样，直接按上述 V3.3 顺序输出所有 Stage-2 valid grid candidates。也可以通过 `--all-generated-frames` 对其他 Stage3 配置显式开启；该模式要求 `holes.strategy=none`，以保持 Stage-2 候选与输出帧一一对应。
+两次完整 pipeline 对照可分别传入 `--renderer-backend gsplat` 和 `--renderer-backend gs_render`，从而不修改配置文件中的其他参数。
+
+为排除 Stage-2 depth 导致的位姿差异，可以将同一份固定 camera JSON 分别交给两个 backend：
+
+```powershell
+python -m viewpoint_framework.renderer.render_sequence_diagnostic `
+  --backend gsplat --gaussian-ply <scene.ply> --cameras <gen_cameras.json> `
+  --pose-config-json viewpoint_framework/configs/v3_3_pose_generation.json `
+  --output-dir <compare>/gsplat
+
+python -m viewpoint_framework.renderer.render_sequence_diagnostic `
+  --backend gs_render --gaussian-ply <scene.ply> --cameras <gen_cameras.json> `
+  --pose-config-json viewpoint_framework/configs/v3_3_pose_generation.json `
+  --output-dir <compare>/gs_render
+```
+
+该诊断默认只渲染 geometry-only RGB/alpha；只有显式传入 `--render-depths` 才调用 depth path。两次必须使用相同的 `--max-image-dim` 和 `--near-plane`。
+
+输出可逐帧汇总 RGB/alpha 误差、camera 对齐，以及可选 depth valid-mask/relative error：
+
+```powershell
+python -m viewpoint_framework.renderer.compare_sequence_outputs `
+  --left <compare>/gsplat --right <compare>/gs_render `
+  --output-json <compare>/comparison.json
+```
 
 ## 目录与兼容性
 
@@ -129,6 +157,6 @@ python -m viewpoint_framework.renderer.gs_render_contract_smoke \
 
 ## 验证状态
 
-- 原有回归 + V3.3 专项单元测试：`78 passed, 2 skipped`。新增 raw PLY storage、`gs_render` raw boundary 和 `gsplat` activated boundary 的 contract 回归测试；真实 CUDA rasterization contract 仍由上述独立进程 smoke test 验证。
+- 原有回归 + V3.3 专项单元测试：`81 passed, 2 skipped`。新增 raw PLY storage、`gs_render` raw boundary、`gsplat` activated boundary、camera contract、frame manifest 和 backend comparison metrics 的回归测试；真实 CUDA rasterization contract 仍由上述独立进程 smoke test 验证。
 - 新增覆盖：hole 禁止 over-nominal、center guard/crossing、Coverage Consensus、360° 半开采样、raw PLY tail 40962 skybox、elevation center-out ordering与 planar-depth 数值测试。私有 renderer contract 不再由 mock 单元测试替代，改由真实环境中的独立进程 smoke test 验证。
 - V3.2 的 34-case 数字作为冻结基线记录于本文；本次代码环境未执行完整数据集批量渲染。正式接受 V3.3 前仍需在真实 `gs_render` 私有环境中验证 planar depth、geometry-only split、pano RGB/alpha/depth 对齐，并重跑 34-case 与高噪声专项 case。
