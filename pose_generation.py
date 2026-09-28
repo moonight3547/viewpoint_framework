@@ -138,6 +138,9 @@ class PoseGenerationConfig:
     grid: GridConfig = field(default_factory=GridConfig)
     radius: RadiusConfig = field(default_factory=RadiusConfig)
     renderer: RendererConfig = field(default_factory=RendererConfig)
+    # V3.3 keeps its expanded angular proposal, while placement can be
+    # independently pinned to the previously validated V3.2 radius/height path.
+    v33_placement_strategy: str = "v3_2"  # v3_2 | v3_3
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PoseGenerationConfig":
@@ -1165,10 +1168,33 @@ def generate_candidate_poses(
                 point_cloud_points, depth_probe, config,
             )
         if str(config.version).startswith("3.3"):
-            from viewpoint_framework.stage2.pipeline import generate_v33_candidates
-            return generate_v33_candidates(
-                captured_cameras, profile, bbox, view_limits, grid, mode_result,
-                point_cloud_points, depth_probe, config, v33_view_domain,
+            if config.v33_placement_strategy == "v3_2":
+                from viewpoint_framework.pose_generation_v32 import generate_v32_candidates
+                result = generate_v32_candidates(
+                    captured_cameras, profile, bbox, view_limits, grid, mode_result,
+                    point_cloud_points, depth_probe, config,
+                )
+                result.diagnostics.update({
+                    "version": "3.3_grid_v3.2_placement",
+                    "angular_grid_version": "3.3",
+                    "placement_version": "3.2",
+                })
+                result.placement_metadata.update({
+                    "version": "3.3_grid_v3.2_placement",
+                    "angular_grid_version": "3.3",
+                    "placement_version": "3.2",
+                    "view_domain": to_jsonable(v33_view_domain),
+                })
+                return result
+            if config.v33_placement_strategy == "v3_3":
+                from viewpoint_framework.stage2.pipeline import generate_v33_candidates
+                return generate_v33_candidates(
+                    captured_cameras, profile, bbox, view_limits, grid, mode_result,
+                    point_cloud_points, depth_probe, config, v33_view_domain,
+                )
+            raise ValueError(
+                "v33_placement_strategy must be 'v3_2' or 'v3_3', got "
+                f"{config.v33_placement_strategy!r}"
             )
         from viewpoint_framework.pose_generation_v3 import generate_v3_candidates
         return generate_v3_candidates(

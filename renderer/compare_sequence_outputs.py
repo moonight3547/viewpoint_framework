@@ -79,6 +79,25 @@ def compare_outputs(left_root, right_root):
     except ImportError as exc:
         raise ImportError("Sequence comparison requires opencv-python (cv2).") from exc
     left_root, right_root = Path(left_root), Path(right_root)
+    def load_metadata(root):
+        path = root / "diagnostic_metadata.json"
+        if not path.is_file():
+            return {}
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    left_meta, right_meta = load_metadata(left_root), load_metadata(right_root)
+    contract_fields = (
+        "source_cameras", "source_gaussian_ply", "frame_count",
+        "max_image_dim", "near_plane", "gaussian_subset",
+        "canonical_gaussian_count", "rendered_gaussian_count",
+        "skybox_gaussian_count",
+    )
+    contract = {
+        key: {"left": left_meta.get(key), "right": right_meta.get(key),
+              "match": left_meta.get(key) == right_meta.get(key)}
+        for key in contract_fields
+    }
     left_cameras = load_cameras_json(left_root / "cameras.json")
     right_cameras = load_cameras_json(right_root / "cameras.json")
     count = min(len(left_cameras), len(right_cameras))
@@ -126,6 +145,10 @@ def compare_outputs(left_root, right_root):
                     and row["camera"]["rotation_delta_deg"] <= 1e-5
                     and row["camera"]["intrinsic_max_abs"] <= 1e-7
                     for row in rows)),
+        "render_contract_aligned": bool(
+            left_meta and right_meta
+            and all(item["match"] for item in contract.values())),
+        "render_contract": contract,
         "summary": {
             "rgb_mae": _summary(rows, "rgb", "mae"),
             "alpha_mae": _summary(rows, "alpha", "mae"),

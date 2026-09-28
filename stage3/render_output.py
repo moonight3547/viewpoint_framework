@@ -50,13 +50,21 @@ def render_camera_sequence(
     alpha_dir: Path | None = None,
     depth_dir: Path | None = None,
     max_image_dim: int | None = None,
+    gaussian_subset: str = "geometry",
 ) -> list[str]:
+    if gaussian_subset not in ("geometry", "full"):
+        raise ValueError("gaussian_subset must be 'geometry' or 'full'")
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, camera in enumerate(cameras):
-        result = renderer.render_geometry(
-            camera, max_image_dim=max_image_dim, need_rgb=True, need_alpha=True,
-            need_depth=depth_dir is not None)
+        if gaussian_subset == "geometry":
+            result = renderer.render_geometry(
+                camera, max_image_dim=max_image_dim, need_rgb=True,
+                need_alpha=True, need_depth=depth_dir is not None)
+        else:
+            result = renderer.render(
+                camera, max_image_dim=max_image_dim, need_rgb=True,
+                need_depth=depth_dir is not None, include_skybox=True)
         rgb = result.rgb
         path = output_dir / f"{prefix}_{i:04d}.png"
         _write_rgb_png(path, rgb)

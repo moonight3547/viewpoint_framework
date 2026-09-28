@@ -12,6 +12,17 @@ V3.2 的主要限制是 proposal 仍偏保守：`radius_max` 对原地/窄轨迹
 
 ## V3.3 算法
 
+当前默认采用混合回退策略：angular proposal 仍使用 V3.3 的
+`eye_pitch_fov` azimuth × elevation grid；radius、local/global height、depth
+adjustment、crossing 与 final safety 则由已验证的 V3.2 placement 路径执行。
+配置项为 `v33_placement_strategy=v3_2`；仅在显式设置为 `v3_3` 时启用
+V3.3 radius/height placement。
+
+V3.3 生成相机默认使用 `intrinsics_strategy=first`，逐值继承首个输入相机的
+`fx/fy/cx/cy/width/height`。不再默认将焦距乘以 `0.7`，也不再强制把主点改到
+图像中心。renderer 只会在 `max_image_dim` 请求缩放输出时，按实际宽高比例同步
+缩放 `fx/fy/cx/cy`。
+
 ### 1. Angular proposal
 
 - 使用所有有限 captured cameras 的 canonical `camera.forward`。
@@ -77,6 +88,14 @@ Stage3 每个最终相机只进行一次 geometry-only unified render，并输�
 
 `configs/stage3_v3_3.json` 当前开启 `output_all_stage2_candidates=true`：Stage3 跳过 FPS/coverage、near-duplicate filter 和 `num_panos` 降采样，直接按上述 V3.3 顺序输出所有 Stage-2 valid grid candidates。也可以通过 `--all-generated-frames` 对其他 Stage3 配置显式开启；该模式要求 `holes.strategy=none`，以保持 Stage-2 候选与输出帧一一对应。
 两次完整 pipeline 对照可分别传入 `--renderer-backend gsplat` 和 `--renderer-backend gs_render`，从而不修改配置文件中的其他参数。
+
+固定相机 renderer 诊断支持 `--gaussian-subset geometry|full`。建议对同一个
+camera JSON 分别运行两种 subset，先排除 skybox split 导致的输入集合差异。
+`diagnostic_metadata.json` 会记录 canonical/rendered/skybox Gaussian 数量、该
+backend 是否实际消费 `near_plane`，以及每帧 Gaussian center 落入 near plane
+和保守 3σ support 触及 near plane 的数量。当前只有 gsplat adapter 显式消费
+`near_plane`；gs_render metadata 会明确标记为 false，避免把仅记录但未传入的
+参数误认为已经对齐。
 
 为排除 Stage-2 depth 导致的位姿差异，可以将同一份固定 camera JSON 分别交给两个 backend：
 

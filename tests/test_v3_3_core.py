@@ -1,6 +1,8 @@
 import numpy as np
 import types
 import pytest
+import json
+from pathlib import Path
 
 from viewpoint_framework.scene_types import CircularInterval
 from viewpoint_framework.skybox_detection import SkyboxDetectionConfig, detect_skybox_gaussians
@@ -12,6 +14,13 @@ from viewpoint_framework.stage3.selection import SelectionConfig, order_selected
 from viewpoint_framework.view_space import sample_circular_interval
 from viewpoint_framework.height_safety import LOCAL_RELIABLE
 from viewpoint_framework.renderer.gs_render_backend import compute_plane_depth
+from viewpoint_framework.pose_generation import (
+    PoseGenerationConfig,
+    _generated_intrinsics,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _side(limit):
@@ -105,3 +114,23 @@ def test_compute_plane_depth_returns_camera_z_depth():
     depth = compute_plane_depth(normal, distance, cam, torch)
     assert depth.shape == (2, 3)
     assert torch.allclose(depth, torch.full((2, 3), 2.0), atol=1e-6)
+
+
+def test_v33_defaults_to_v32_placement_and_preserves_input_intrinsics():
+    cfg = PoseGenerationConfig.from_dict(json.loads(
+        (ROOT / "configs/v3_3_pose_generation.json").read_text()))
+    assert cfg.v33_placement_strategy == "v3_2"
+    assert cfg.local_height.strategy == "geometry_depth_up_down"
+    assert cfg.local_height.probe_origin == "segment_endpoints"
+    assert cfg.intrinsics_strategy == "first"
+    assert cfg.focal_ratio == 1.0
+    assert not cfg.center_principal_point
+
+    camera = types.SimpleNamespace(
+        fx=913.25, fy=907.5, cx=511.75, cy=287.25,
+        width=1024, height=576,
+    )
+    assert _generated_intrinsics([camera], cfg) == (
+        camera.fx, camera.fy, camera.cx, camera.cy,
+        camera.width, camera.height,
+    )
