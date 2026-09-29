@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Optional, Sequence
 
-from viewpoint_framework.cameras_util import Camera, load_cameras_json
+from viewpoint_framework.utils.cameras import Camera, load_cameras_json
 from viewpoint_framework.stage3.types import SelectedViewSet
 
 

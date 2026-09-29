@@ -20,7 +20,7 @@ from viewpoint_framework.height_safety import (
 from viewpoint_framework.pose_generation import (
     CandidateStatus, GeneratedCandidate, PoseGenerationResult, build_generated_camera,
 )
-from viewpoint_framework.pose_generation_v3 import initial_position_from_rho, propose_signed_radius
+from viewpoint_framework.stage2.placement import initial_position_from_rho, propose_signed_radius
 from viewpoint_framework.scene_types import CameraMode, to_jsonable
 from viewpoint_framework.trajectory_safe_field import TrajectorySafeField
 from viewpoint_framework.view_space import direction_to_azimuth_elevation

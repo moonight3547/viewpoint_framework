@@ -12,7 +12,7 @@ import subprocess
 import sys
 import traceback
 
-from viewpoint_framework.cameras_util import load_cameras_json
+from viewpoint_framework.utils.cameras import load_cameras_json
 from viewpoint_framework.gs_renderer import GaussianRendererConfig
 from viewpoint_framework.pose_generation import PoseGenerationConfig
 from viewpoint_framework.renderer.contract_diagnostics import print_contract

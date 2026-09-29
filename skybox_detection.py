@@ -15,7 +15,7 @@ EPS = 1e-10
 class SkyboxDetectionConfig:
     enabled: bool = False
     candidate_inner_ratio: float = 0.80
-    # V3.1 contract: classify by distance to skybox_center within 0.5% radius.
+    # Radial-band contract: classify around the fitted skybox sphere.
     radial_band_ratio: float = 0.005
     irls_iterations: int = 6
     mad_multiplier: float = 4.0
@@ -23,7 +23,7 @@ class SkyboxDetectionConfig:
     min_shell_points: int = 32
     max_axis_anisotropy: float = 0.15
     low_confidence_behavior: str = "conservative"  # conservative | disable
-    strategy: str = "legacy"  # legacy | tail_strict
+    strategy: str = "radial_band"  # radial_band | tail_strict
     expected_tail_count: int = 40962
     strict_scale_axis_ratio: float = 0.02
     strict_scale_cv: float = 0.02
@@ -209,7 +209,7 @@ def detect_skybox_gaussians(
               f"angular={angular_coverage:.4f} scale_cv={scale_cv:.6g}")
         return SkyboxDetectionResult(mask, center, radius,
                                      1.0 if accepted else 0.0, diagnostics)
-    if cfg.strategy != "legacy":
+    if cfg.strategy != "radial_band":
         raise ValueError(f"Unknown skybox strategy={cfg.strategy}")
 
     distances0 = np.linalg.norm(means - skybox_center0[None], axis=1)
@@ -225,7 +225,7 @@ def detect_skybox_gaussians(
     radii = np.linalg.norm(means - skybox_center[None], axis=1)
     residual = np.abs(radii - skybox_radius)
     radial_tolerance = max(float(cfg.radial_band_ratio) * skybox_radius, EPS)
-    # Direct V3.1 classification rule requested by the dataset owner.
+    # Direct radial-band classification.
     radial_mask = residual <= radial_tolerance
     radial_values = residual[radial_mask]
     residual_median = float(np.median(radial_values)) if len(radial_values) else float("inf")

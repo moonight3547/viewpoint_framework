@@ -10,10 +10,14 @@
   "mode": {
     "strategy": "robust",
     "global_strategy": "weighted",
-    "max_alignment_deg": 20.0,
-    "max_residual_ratio": 0.35,
-    "min_fit_weight": 0.2,
+    "max_alignment_deg": 25.0,
+    "max_residual_ratio": 0.45,
+    "min_fit_weight": 0.15,
     "dominant_ratio": 0.75
+  },
+  "center_refinement": {
+    "strategy": "dominant_mode_once",
+    "min_support_ratio": 0.2
   },
   "view_space": {
     "strategy": "circular_robust",
@@ -26,10 +30,12 @@
     "adaptive_extension_factor": 0.5,
     "min_extension_deg": 5.0,
     "max_extension_deg": 15.0,
-    "radius_extension_ratio": 0.0
+    "radius_extension_ratio": 0.0,
+    "min_support_cameras": 1
   },
   "radius": {
     "strategy": "angular_knn",
+    "support_strategy": "all_cameras",
     "k_neighbors": 6,
     "min_neighbors": 3,
     "sigma_deg": 20.0,
@@ -43,3 +49,4 @@
     "include_invalid_samples": true
   }
 }
+

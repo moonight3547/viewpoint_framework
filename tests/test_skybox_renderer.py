@@ -16,7 +16,7 @@ from viewpoint_framework.skybox_detection import (
     detect_skybox_gaussians,
 )
 from viewpoint_framework.stage3.visibility import GaussianVisibilityModel, VisibilityConfig
-from viewpoint_framework.tests.test_pose_generation_synthetic import _camera_at
+from viewpoint_framework.tests.helpers import camera_at
 
 
 def sphere_points(count, radius, center=(0., 0., 0.)):
@@ -83,7 +83,7 @@ def test_depth_probe_calls_geometry_only_renderer():
         renderer=renderer,
         config=DepthProbeConfig(min_valid_pixels=1, min_valid_ratio=0.0),
     )
-    result = probe.probe(_camera_at(0, [0, 0, 0], [0, 0, 1]))
+    result = probe.probe(camera_at(0, [0, 0, 0], [0, 0, 1]))
     assert renderer.called
     assert not result.valid
 
@@ -105,8 +105,8 @@ def test_gaussian_visibility_samples_geometry_group_only():
 
 def test_near_plane_uses_captured_horizontal_radius_and_is_explicit():
     cameras = [
-        _camera_at(0, [0., 100., 2.], [0., 0., 1.]),
-        _camera_at(1, [0., -100., 4.], [0., 0., 1.]),
+        camera_at(0, [0., 100., 2.], [0., 0., 1.]),
+        camera_at(1, [0., -100., 4.], [0., 0., 1.]),
     ]
     near = resolve_renderer_near_plane(
         cameras, np.zeros(3), np.array([0., 1., 0.]),
@@ -114,3 +114,4 @@ def test_near_plane_uses_captured_horizontal_radius_and_is_explicit():
     )
     assert near == pytest.approx(0.03)
     assert "near_plane=float(self.config.near_plane)" in inspect.getsource(GsplatRenderer.render)
+

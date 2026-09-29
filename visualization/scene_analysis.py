@@ -4,7 +4,7 @@
 """Interactive diagnostic visualization for scene-understanding results.
 
 This module reuses the existing viewpoint-framework Plotly camera/point-cloud
-builders rather than replacing ``visualize_cameras.py``.  It adds analysis
+builders from ``visualization.cameras``. It adds analysis
 specific overlays:
     - fitted scene center
     - per-mode camera groups
@@ -21,17 +21,17 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import plotly.graph_objects as go
 
-from viewpoint_framework.cameras_util import Camera, camera_positions
-from viewpoint_framework.geometry_util import estimate_camera_visualization_depth
-from viewpoint_framework.points_util import load_ply_point_cloud
+from viewpoint_framework.utils.cameras import Camera, camera_positions
+from viewpoint_framework.utils.geometry import estimate_camera_visualization_depth
+from viewpoint_framework.utils.points import load_ply_point_cloud
 from viewpoint_framework.scene_types import CameraMode, CameraSceneRelation
 from viewpoint_framework.scene_understanding import SceneUnderstandingResult
-from viewpoint_framework.util import prepare_html_output_path
+from viewpoint_framework.utils.runtime import prepare_html_output_path
 from viewpoint_framework.view_space import (
     azimuth_elevation_to_direction,
     sample_circular_interval,
 )
-from viewpoint_framework.visualize_cameras import (
+from viewpoint_framework.visualization.cameras import (
     build_camera_frustum_trace,
     build_point_cloud_trace,
 )

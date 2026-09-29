@@ -134,3 +134,17 @@ def test_v33_defaults_to_v32_placement_and_preserves_input_intrinsics():
         camera.fx, camera.fy, camera.cx, camera.cy,
         camera.width, camera.height,
     )
+
+
+def test_v32_and_native_v33_placement_remain_configurable():
+    v32 = PoseGenerationConfig.from_dict(json.loads(
+        (ROOT / "configs/v3_2_pose_generation.json").read_text()))
+    assert v32.version == "3.2"
+    assert v32.position_strategy == "trajectory_safe_field"
+    assert v32.trajectory_safe_field.rho_strategy == "segment_ray_min"
+    assert v32.local_height.enabled and v32.global_height.enabled
+
+    v33 = PoseGenerationConfig.from_dict(json.loads(
+        (ROOT / "configs/v3_3_pose_generation.json").read_text()))
+    v33.v33_placement_strategy = "v3_3"
+    assert v33.v33_placement_strategy == "v3_3"

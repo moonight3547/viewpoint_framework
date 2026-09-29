@@ -8,7 +8,7 @@ so Stage 3 does *not* look for holes in that 2-D grid.  Instead, it looks for
 3-D reconstruction regions that are poorly observed by the preselected captured
 anchor views.
 
-V1 uses sampled Gaussian surface elements.  Visibility counts over the selected
+The default uses sampled Gaussian surface elements. Visibility counts over selected
 captured views identify under-observed Gaussians, which are spatially clustered.
 A focused view reuses the *position* of a Stage-2 geometry-safe candidate, changes
 only orientation/intrinsics, and therefore preserves Stage-2 collision safety.
@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.gs_renderer import GsplatRenderer
 from viewpoint_framework.pose_generation import build_c2w_from_forward
 from viewpoint_framework.stage3.types import (
@@ -165,7 +165,7 @@ def detect_geometric_holes(
 ) -> Tuple[List[HoleCluster], np.ndarray]:
     """Detect under-observed *existing* representation elements.
 
-    This is the robust V1 default: a Gaussian can exist in the reconstruction yet
+    A Gaussian can exist in the reconstruction yet
     be seen by too few of the preselected captured anchor views.
     """
     config = config or HoleDetectionConfig()

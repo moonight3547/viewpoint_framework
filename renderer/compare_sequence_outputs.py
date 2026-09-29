@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import load_cameras_json
+from viewpoint_framework.utils.cameras import load_cameras_json
 
 
 def _array_metrics(left, right):

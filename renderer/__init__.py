@@ -1,4 +1,4 @@
-"""V3.3 renderer contract; legacy renderer imports remain supported."""
+"""V3.3 renderer contract and backend factory."""
 from .factory import NoRendererAvailable, RendererRasterizationFailure, create_renderer
 from .types import GaussianRenderResult, GaussianSceneData
 

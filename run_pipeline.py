@@ -9,7 +9,7 @@ import argparse
 import json
 from pathlib import Path
 
-from viewpoint_framework.cameras_util import load_cameras_json
+from viewpoint_framework.utils.cameras import load_cameras_json
 from viewpoint_framework.gs_depth_probe import DepthProbeConfig, GsplatDepthProbe
 from viewpoint_framework.gs_renderer import (
     GaussianRendererConfig,
@@ -17,7 +17,7 @@ from viewpoint_framework.gs_renderer import (
     resolve_renderer_near_plane,
 )
 from viewpoint_framework.renderer import create_renderer
-from viewpoint_framework.points_util import load_ply_point_cloud
+from viewpoint_framework.utils.points import load_ply_point_cloud
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
     generate_candidate_poses,
@@ -62,6 +62,13 @@ def build_argparser() -> argparse.ArgumentParser:
         "--all-generated-frames", action="store_true",
         help=("Stage 3 outputs every valid Stage-2 grid candidate in the configured "
               "V3.3 ordering; bypasses selection/downsampling."))
+    p.add_argument(
+        "--portrait-output",
+        choices=("off", "auto_cw90", "auto_ccw90"),
+        default=None,
+        help=("Rotate final landscape pano rasters/cameras into portrait orientation. "
+              "This does not change Stage 1/2 poses or selection."),
+    )
 
     # Stage-2 high-value overrides.
     p.add_argument("--mode", choices=("auto", "outside_in", "inside_out"), default="auto")
@@ -76,7 +83,7 @@ def build_argparser() -> argparse.ArgumentParser:
     # Stage-3 experiment overrides.
     p.add_argument(
         "--selection-strategy",
-        choices=("legacy_position_fps", "angular_fps", "utility_angular_fps", "greedy_coverage"),
+        choices=("position_fps", "angular_fps", "utility_angular_fps", "greedy_coverage"),
         default=None,
     )
     p.add_argument("--selection-reference", choices=("generated_only", "captured_seeded"), default=None)
@@ -84,7 +91,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--hole-strategy", choices=("none", "gaussian_undercoverage", "pointcloud_gaussian_gap"), default=None)
     p.add_argument(
         "--reference-strategy",
-        choices=("legacy_global_fps", "target_coverage_greedy", "artifixer_style_covisibility"),
+        choices=("position_fps", "target_coverage_greedy", "artifixer_style_covisibility"),
         default=None,
     )
     p.add_argument("--ordering-strategy", choices=("grid_order", "nearest_neighbor", "selection_order", "elevation_center_out"), default=None)
@@ -92,27 +99,34 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def _build_configs(args):
-    scene_cfg = SceneUnderstandingConfig.default()
-    if args.scene_config_json:
-        scene_cfg = SceneUnderstandingConfig.from_dict(_load_json(args.scene_config_json))
-
-    pose_cfg = PoseGenerationConfig()
-    if args.pose_config_json:
-        pose_cfg = PoseGenerationConfig.from_dict(_load_json(args.pose_config_json))
+    config_dir = Path(__file__).parent / "configs"
+    scene_cfg = SceneUnderstandingConfig.from_dict(
+        _load_json(
+            args.scene_config_json
+            or str(config_dir / "stage1_scene_understanding.json")
+        )
+    )
+    pose_cfg = PoseGenerationConfig.from_dict(
+        _load_json(
+            args.pose_config_json or str(config_dir / "v3_3_pose_generation.json")
+        )
+    )
     if args.mode != "auto":
         pose_cfg.mode_strategy = "forced"
         pose_cfg.forced_mode = args.mode
     if args.grid_gap is not None:
         pose_cfg.azimuth_step_deg = float(args.grid_gap)
         pose_cfg.elevation_step_deg = float(args.grid_gap)
+        pose_cfg.grid.azimuth_step_deg = float(args.grid_gap)
+        pose_cfg.grid.elevation_step_deg = float(args.grid_gap)
     if args.focal_ratio is not None:
         pose_cfg.focal_ratio = float(args.focal_ratio)
     if args.renderer_backend is not None:
         pose_cfg.renderer.backend = args.renderer_backend
 
-    stage3_cfg = Stage3Config()
-    if args.stage3_config_json:
-        stage3_cfg = Stage3Config.from_dict(_load_json(args.stage3_config_json))
+    stage3_cfg = Stage3Config.from_dict(
+        _load_json(args.stage3_config_json or str(config_dir / "stage3_v3_3.json"))
+    )
     stage3_cfg.num_panos = int(args.num_panos)
     stage3_cfg.num_refs = int(args.num_refs)
     stage3_cfg.debug_mode = bool(args.debug_mode)
@@ -123,6 +137,8 @@ def _build_configs(args):
         or str(pose_cfg.version).startswith("3.3"))
     if args.all_generated_frames:
         stage3_cfg.output_all_stage2_candidates = True
+    if args.portrait_output is not None:
+        stage3_cfg.output_transform.portrait_output = args.portrait_output
     if args.selection_strategy:
         stage3_cfg.selection.strategy = args.selection_strategy
     if args.selection_reference:
@@ -181,7 +197,7 @@ def main() -> None:
             args.gaussian_ply, backend=pose_cfg.renderer.backend,
             config=renderer_config, device=args.device)
     else:
-        # Preserve the V2/V3.0-V3.2 backend behavior exactly.
+        # V3.2 has a single validated gsplat backend.
         renderer = GsplatRenderer(
             args.gaussian_ply, config=renderer_config, device=args.device)
     depth_probe = GsplatDepthProbe(

@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.scene_types import CameraMode
 from viewpoint_framework.stage3.types import CandidateOrigin, SelectionCandidate
 from viewpoint_framework.stage3.visibility import NullVisibilityModel, VisibilityModel
@@ -21,13 +21,13 @@ EPS = 1e-10
 
 @dataclass
 class SelectionConfig:
-    strategy: str = "angular_fps"  # legacy_position_fps | angular_fps | utility_angular_fps | greedy_coverage
+    strategy: str = "angular_fps"  # position_fps | angular_fps | utility_angular_fps | greedy_coverage
     reference: str = "generated_only"  # generated_only | captured_seeded
     information_gain_strategy: str = "none"  # none | gaussian_visibility | pointcloud_visibility
     coverage_include_captured: bool = True
     ig_tie_ratio: float = 0.97
 
-    # Denoising quality V1: do not guess quality except remove near-duplicates.
+    # Do not guess denoising quality except for near-duplicate removal.
     quality_strategy: str = "none"  # none | render_quality_band (interface reserved)
     near_duplicate_filter: bool = True
     near_duplicate_forward_deg: float = 2.0
@@ -199,7 +199,7 @@ def select_views(
     if config.quality_strategy == "render_quality_band":
         raise NotImplementedError(
             "render_quality_band is intentionally reserved for a later experiment; "
-            "V1 uses quality_strategy='none'."
+            "Use quality_strategy='none'."
         )
 
     vis_rows: Dict[int, np.ndarray] = {}
@@ -282,7 +282,7 @@ def select_views(
                     "secondary": float(best_secondary),
                 }
             )
-    elif config.strategy == "legacy_position_fps":
+    elif config.strategy == "position_fps":
         pool = list(normal)
         seed_positions = [c.camera.position.copy() for c in forced]
         if config.reference == "captured_seeded":

@@ -11,7 +11,12 @@ from typing import Dict, Sequence
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
+from viewpoint_framework.utils.camera_output_transform import (
+    PortraitOutputMode,
+    rotate_raster_for_output,
+    transform_camera_for_output,
+)
 from viewpoint_framework.gs_renderer import GsplatRenderer
 from viewpoint_framework.pose_generation import save_cameras_json
 from viewpoint_framework.stage3.types import SelectionCandidate, Stage3Result, to_jsonable
@@ -51,12 +56,14 @@ def render_camera_sequence(
     depth_dir: Path | None = None,
     max_image_dim: int | None = None,
     gaussian_subset: str = "geometry",
+    portrait_output: PortraitOutputMode = "off",
 ) -> list[str]:
     if gaussian_subset not in ("geometry", "full"):
         raise ValueError("gaussian_subset must be 'geometry' or 'full'")
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, camera in enumerate(cameras):
+        _, rotation = transform_camera_for_output(camera, portrait_output)
         if gaussian_subset == "geometry":
             result = renderer.render_geometry(
                 camera, max_image_dim=max_image_dim, need_rgb=True,
@@ -65,28 +72,42 @@ def render_camera_sequence(
             result = renderer.render(
                 camera, max_image_dim=max_image_dim, need_rgb=True,
                 need_depth=depth_dir is not None, include_skybox=True)
-        rgb = result.rgb
+        rgb = rotate_raster_for_output(result.rgb, rotation)
         path = output_dir / f"{prefix}_{i:04d}.png"
         _write_rgb_png(path, rgb)
         if alpha_dir is not None:
-            _write_alpha_png(alpha_dir / f"{prefix}_{i:04d}.png", result.alpha)
+            _write_alpha_png(
+                alpha_dir / f"{prefix}_{i:04d}.png",
+                rotate_raster_for_output(result.alpha, rotation),
+            )
         if depth_dir is not None:
             depth_dir.mkdir(parents=True, exist_ok=True)
+            depth = rotate_raster_for_output(result.depth, rotation)
             np.save(depth_dir / f"{prefix}_{i:04d}.npy",
-                    np.asarray(result.depth, dtype=np.float32))
+                    np.asarray(depth, dtype=np.float32))
         paths.append(str(path))
     return paths
 
 
-def build_frame_manifest(result: Stage3Result) -> list[dict]:
+def build_frame_manifest(
+    result: Stage3Result,
+    output_cameras: Sequence[Camera] | None = None,
+    applied_rotations: Sequence[str] | None = None,
+) -> list[dict]:
     """Return a stable frame-to-candidate mapping for backend comparisons."""
     if len(result.selected_candidates) != len(result.selected_cameras):
         raise ValueError(
             "selected_candidates and selected_cameras must have identical lengths")
+    if output_cameras is None:
+        output_cameras = result.selected_cameras
+    if len(output_cameras) != len(result.selected_cameras):
+        raise ValueError("output_cameras and selected_cameras must have identical lengths")
+    if applied_rotations is not None and len(applied_rotations) != len(output_cameras):
+        raise ValueError("applied_rotations and output_cameras must have identical lengths")
     rows = []
-    for output_index, (candidate, camera) in enumerate(zip(
-            result.selected_candidates, result.selected_cameras)):
-        rows.append({
+    for output_index, (candidate, source_camera, camera) in enumerate(zip(
+            result.selected_candidates, result.selected_cameras, output_cameras)):
+        row = {
             "output_index": output_index,
             "image": f"frame_{output_index:04d}.png",
             "candidate_id": int(candidate.candidate_id),
@@ -98,7 +119,13 @@ def build_frame_manifest(result: Stage3Result) -> list[dict]:
             "signed_radius": candidate.signed_radius,
             "camera_index": int(camera.index),
             "camera": to_jsonable(camera),
-        })
+        }
+        if applied_rotations is not None:
+            row["source_camera"] = to_jsonable(source_camera)
+            row["output_transform"] = {
+                "applied_rotation": applied_rotations[output_index]
+            }
+        rows.append(row)
     return rows
 
 
@@ -110,6 +137,7 @@ def save_stage3_outputs(
     debug_mode: bool,
     render_pano_depths: bool = False,
     geometry_output_contract: bool = False,
+    portrait_output: PortraitOutputMode = "off",
     stage2_grid_candidates: Sequence[SelectionCandidate],
 ) -> Dict[str, str]:
     root = Path(output_dir).expanduser().resolve()
@@ -124,25 +152,61 @@ def save_stage3_outputs(
     traj_refs_path = root / "traj_refs.json"
     traj_lens_path = root / "traj_lens.json"
 
-    save_cameras_json(result.selected_cameras, str(pano_cameras_path))
+    transformed = [
+        transform_camera_for_output(camera, portrait_output)
+        for camera in result.selected_cameras
+    ]
+    output_cameras = [camera for camera, _ in transformed]
+    applied_rotations = [rotation for _, rotation in transformed]
+    save_cameras_json(output_cameras, str(pano_cameras_path))
     with open(frame_manifest_path, "w", encoding="utf-8") as f:
-        json.dump(build_frame_manifest(result), f, indent=2)
+        json.dump(
+            build_frame_manifest(
+                result,
+                output_cameras=output_cameras,
+                applied_rotations=(
+                    applied_rotations if portrait_output != "off" else None
+                ),
+            ),
+            f,
+            indent=2,
+        )
     if geometry_output_contract:
         render_camera_sequence(renderer, result.selected_cameras, pano_images_dir,
                                prefix="frame", alpha_dir=pano_alphas_dir,
-                               depth_dir=pano_depths_dir)
+                               depth_dir=pano_depths_dir,
+                               portrait_output=portrait_output)
     else:
-        # V2/V3.0-V3.2 retain the original full-RGB render path and outputs.
+        # V3.2 retains the full-RGB render path and outputs.
         pano_images_dir.mkdir(parents=True, exist_ok=True)
         for i, camera in enumerate(result.selected_cameras):
-            _write_rgb_png(pano_images_dir / f"frame_{i:04d}.png",
-                           renderer.render_rgb(camera, max_image_dim=None))
+            _, rotation = transform_camera_for_output(camera, portrait_output)
+            rgb = rotate_raster_for_output(
+                renderer.render_rgb(camera, max_image_dim=None), rotation)
+            _write_rgb_png(pano_images_dir / f"frame_{i:04d}.png", rgb)
     if pano_depths_dir is not None:
         with open(pano_depths_dir / "depth_meta.json", "w", encoding="utf-8") as f:
             json.dump({
                 "convention": "camera_z_planar_depth", "dtype": "float32",
                 "invalid_value": 0.0, "skybox_included": False,
                 "renderer_backend": getattr(renderer, "backend_name", "gsplat"),
+            }, f, indent=2)
+
+    if portrait_output != "off":
+        output_transform_path = root / "output_transform.json"
+        with open(output_transform_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "portrait_output": portrait_output,
+                "scope": "final_pano_outputs_only",
+                "reference_alignment": {
+                    "traj_refs_index_space": "original_train_cameras",
+                    "reference_transform": "none",
+                    "note": (
+                        "Captured references remain in their original resolution "
+                        "and orientation; downstream cross-attention owns their use."
+                    ),
+                },
+                "applied_rotations": applied_rotations,
             }, f, indent=2)
 
     # Keep the previous nested contract: [[idx0, idx1, ...]].
@@ -162,6 +226,8 @@ def save_stage3_outputs(
         paths["pano_alphas"] = str(pano_alphas_dir)
     if pano_depths_dir is not None:
         paths["pano_depths"] = str(pano_depths_dir)
+    if portrait_output != "off":
+        paths["output_transform"] = str(output_transform_path)
 
     if debug_mode:
         debug_dir = root / "debug"

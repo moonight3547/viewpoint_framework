@@ -10,7 +10,7 @@ from viewpoint_framework.renderer.compare_sequence_outputs import (
     _depth_metrics,
 )
 from viewpoint_framework.renderer.types import GaussianSceneData
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.skybox_detection import SkyboxDetectionConfig
 
 

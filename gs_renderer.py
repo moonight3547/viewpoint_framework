@@ -8,7 +8,7 @@ layout.  Stage 2 uses it for low-resolution reverse-depth probes.  Stage 3 reuse
 exactly the same loaded Gaussian tensors for visibility estimation and final RGB
 rendering, avoiding duplicate PLY parsing / GPU upload in the end-to-end path.
 
-Camera convention follows :mod:`viewpoint_framework.cameras_util`:
+Camera convention follows :mod:`viewpoint_framework.utils.cameras`:
     +X right, +Y down, +Z forward, Camera.c2w maps camera -> world.
 """
 
@@ -115,9 +115,8 @@ class GsplatRenderer:
         self.skybox_mask_np = skybox_mask.copy()
         self.sh_degree = int(data.sh_degree)
 
-        # Compatibility names intentionally mean geometry-only in V3.1. This
-        # makes legacy Stage-3 sampling safe even before callers migrate to the
-        # explicit geometry_* aliases below.
+        # Compatibility names intentionally mean geometry-only so Stage-3
+        # sampling stays isolated from skybox tensors.
         self.geometry_means_np = means[geometry_mask]
         self.geometry_scales_np = scales[geometry_mask]
         self.geometry_opacities_np = opacities[geometry_mask]

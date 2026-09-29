@@ -48,7 +48,7 @@ class GeometrySafetyConfig:
     path_step_ratio: float = 0.50  # sample step = clearance * this ratio
     max_path_samples: int = 96
     path_backoff_ratio: float = 0.75
-    # V3 explicitly passes a local threshold; omitted thresholds retain V1/V2.
+    # Candidate-local threshold; omitted values use the configured fallback.
     clearance_strategy: str = "pointcloud_aabb"
     local_clearance_ratio: float = 0.05
     local_clearance_min_ratio: float = 0.01

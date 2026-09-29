@@ -6,7 +6,7 @@ V3.3 在 V3.2 已验证的 trajectory + geometry safety 基线上扩大可探索
 
 基线 commit 为 `93fbefa`。既有 34-case 批量测试为 34/34 成功，耗时 675 秒；Stage2 共 2472 个 grid、2387 个有效候选（96.6%），Stage3 输出 1536 张 pano。562 个 direct-rho column 与 43 个 fallback-rho column 中，segment-ray direct 比例约 92.9%。
 
-V3.1 人工检查的 86 个异常中，78 个属于 skybox/ceiling/floor 等 vertical placement 问题。V3.2 引入 segment-ray rho、geometry-only Local Height、Global Height 及 initial/final height clip 后，34-case 中人工标记异常降为 7 帧，且不再出现大规模 skybox-only、越过 ceiling 或贴 floor/ceiling。因此 V3.3 保留 V3.2 的 geometry/height safety 主链和旧行为入口。
+早期批量检查的 86 个异常中，78 个属于 skybox/ceiling/floor 等 vertical placement 问题。V3.2 引入 segment-ray rho、geometry-only Local Height、Global Height 及 initial/final height clip 后，34-case 中人工标记异常降为 7 帧，且不再出现大规模 skybox-only、越过 ceiling 或贴 floor/ceiling。因此 V3.3 保留 V3.2 的 geometry/height safety 主链，并允许在配置中选择 V3.2 或 V3.3 placement。
 
 V3.2 的主要限制是 proposal 仍偏保守：`radius_max` 对原地/窄轨迹/走廊/大型场景角落约束过强；position elevation 不能表达真实 eye pitch/FOV；azimuth 小缺口无法闭环；inside-out 前贴几何需要更强 diagnostics 继续观察。V3.3 不加入独立 view pitch、Gaussian-aware 最终硬拒绝、多房间/多楼层等复杂策略。
 
@@ -123,7 +123,7 @@ python -m viewpoint_framework.renderer.compare_sequence_outputs `
 
 ## 目录与兼容性
 
-V3.3 正式代码进入 `stage1/`、`stage2/`、`renderer/`、`utils/`、`visualization/`。`stage2/pipeline.py` 是 V3.3 主实现，不新增 `pose_generation_v33.py`。本轮按要求不删除 V1/V2/V3.2 文件和旧 Python import 路径；旧模块由薄 forwarding surface 与原实现继续兼容，清理留到后续版本。
+V3.3 代码位于 `stage2/` 与 `renderer/`，`stage2/pipeline.py` 是原生 V3.3 placement 实现；公共数据协议和版本 dispatch 位于 `pose_generation.py`。V3.2 独立保留在 `pose_generation_v32.py`，不再保留 V1/V2/V3.0/V3.1 的实现和配置入口。
 
 关键配置：
 

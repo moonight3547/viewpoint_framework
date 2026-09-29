@@ -16,7 +16,8 @@ The command writes:
     gen_cameras.json
     gen_cameras_meta.json
 
-``gen_cameras.json`` is the same 18-D protocol consumed by visualize_cameras.py.
+``gen_cameras.json`` is the same 18-D protocol consumed by
+``visualization.cameras``.
 """
 
 from __future__ import annotations
@@ -25,18 +26,18 @@ import argparse
 import json
 from pathlib import Path
 
-from viewpoint_framework.cameras_util import load_cameras_json
+from viewpoint_framework.utils.cameras import load_cameras_json
 from viewpoint_framework.gs_depth_probe import (
     DepthProbeConfig,
     GsplatDepthProbe,
-    NullDepthProbe,
 )
 from viewpoint_framework.gs_renderer import (
     GaussianRendererConfig,
     GsplatRenderer,
     resolve_renderer_near_plane,
 )
-from viewpoint_framework.points_util import load_ply_point_cloud
+from viewpoint_framework.renderer import create_renderer
+from viewpoint_framework.utils.points import load_ply_point_cloud
 from viewpoint_framework.pose_generation import (
     PoseGenerationConfig,
     generate_candidate_poses,
@@ -55,12 +56,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     parser.add_argument("--cameras", required=True, type=str)
     parser.add_argument("--point_cloud", required=True, type=str)
-    parser.add_argument(
-        "--gaussian_ply",
-        type=str,
-        default=None,
-        help="Aligned 3DGS PLY. If omitted, placement keeps the radius prior.",
-    )
+    parser.add_argument("--gaussian_ply", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="pose_generation")
 
     parser.add_argument(
@@ -81,11 +77,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--grid_gap", type=float, default=None)
     parser.add_argument("--focal_ratio", type=float, default=None)
     parser.add_argument(
-        "--radius_strategy",
-        choices=("directional", "azimuth_only", "bbox_median"),
-        default=None,
-    )
-    parser.add_argument(
         "--outside_placement",
         choices=("prior_only", "depth_backoff"),
         default=None,
@@ -95,13 +86,15 @@ def build_argparser() -> argparse.ArgumentParser:
         choices=("prior_only", "no_crossing", "center_crossing_depth"),
         default=None,
     )
-    parser.add_argument("--safety_ratio", type=float, default=None)
-    parser.add_argument("--safety_abs", type=float, default=None)
     parser.add_argument("--disable_path_safety", action="store_true")
 
     # 3DGS depth probe.
-    parser.add_argument("--no_gs_depth", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--renderer-backend",
+        choices=("auto", "gs_render", "gsplat"),
+        default=None,
+    )
     parser.add_argument("--probe_max_dim", type=int, default=256)
     parser.add_argument("--probe_crop_ratio", type=float, default=0.35)
     parser.add_argument("--probe_quantile", type=float, default=0.10)
@@ -127,9 +120,10 @@ def _load_json(path: str) -> dict:
 
 
 def _build_pose_config(args: argparse.Namespace) -> PoseGenerationConfig:
-    config = PoseGenerationConfig()
-    if args.config_json:
-        config = PoseGenerationConfig.from_dict(_load_json(args.config_json))
+    default_path = Path(__file__).parent / "configs" / "v3_3_pose_generation.json"
+    config = PoseGenerationConfig.from_dict(
+        _load_json(args.config_json or str(default_path))
+    )
 
     if args.mode != "auto":
         config.mode_strategy = "forced"
@@ -137,20 +131,18 @@ def _build_pose_config(args: argparse.Namespace) -> PoseGenerationConfig:
     if args.grid_gap is not None:
         config.azimuth_step_deg = args.grid_gap
         config.elevation_step_deg = args.grid_gap
+        config.grid.azimuth_step_deg = args.grid_gap
+        config.grid.elevation_step_deg = args.grid_gap
     if args.focal_ratio is not None:
         config.focal_ratio = args.focal_ratio
-    if args.radius_strategy is not None:
-        config.radius_strategy = args.radius_strategy
     if args.outside_placement is not None:
         config.outside_placement_strategy = args.outside_placement
     if args.inside_placement is not None:
         config.inside_placement_strategy = args.inside_placement
-    if args.safety_ratio is not None:
-        config.geometry.clearance_ratio = args.safety_ratio
-    if args.safety_abs is not None:
-        config.geometry.clearance_abs = args.safety_abs
     if args.disable_path_safety:
         config.use_path_safety = False
+    if args.renderer_backend is not None:
+        config.renderer.backend = args.renderer_backend
 
     return config
 
@@ -165,11 +157,11 @@ def main() -> None:
         max_points=args.pointcloud_max_points,
     )
 
-    scene_config = SceneUnderstandingConfig.default()
-    if args.scene_config_json:
-        scene_config = SceneUnderstandingConfig.from_dict(
-            _load_json(args.scene_config_json)
-        )
+    scene_path = (
+        args.scene_config_json
+        or str(Path(__file__).parent / "configs" / "stage1_scene_understanding.json")
+    )
+    scene_config = SceneUnderstandingConfig.from_dict(_load_json(scene_path))
 
     scene_result = understand_scene(
         cameras=cameras,
@@ -181,33 +173,35 @@ def main() -> None:
         },
     )
 
-    if args.gaussian_ply and not args.no_gs_depth:
-        frame = scene_result.profile.coordinate_frame
-        near_plane = resolve_renderer_near_plane(
-            cameras, scene_result.profile.center_fit.center, frame.y_axis,
-            pose_config.renderer_near_plane,
-        )
-        renderer = GsplatRenderer(
+    frame = scene_result.profile.coordinate_frame
+    near_plane = resolve_renderer_near_plane(
+        cameras, scene_result.profile.center_fit.center, frame.y_axis,
+        pose_config.renderer_near_plane,
+    )
+    renderer_config = GaussianRendererConfig(
+        near_plane=near_plane,
+        skybox=pose_config.skybox,
+        background=tuple(pose_config.renderer.background),
+    )
+    if str(pose_config.version).startswith("3.3"):
+        renderer = create_renderer(
             args.gaussian_ply,
-            config=GaussianRendererConfig(
-                near_plane=near_plane,
-                skybox=pose_config.skybox,
-            ),
+            backend=pose_config.renderer.backend,
+            config=renderer_config,
             device=args.device,
         )
-        probe_config = DepthProbeConfig(
-            strategy=args.depth_strategy,
-            max_image_dim=args.probe_max_dim,
-            central_crop_ratio=args.probe_crop_ratio,
-            depth_quantile=args.probe_quantile,
-            alpha_threshold=args.probe_alpha_threshold,
-        )
-        depth_probe = GsplatDepthProbe(
-            renderer=renderer,
-            config=probe_config,
-        )
     else:
-        depth_probe = NullDepthProbe()
+        renderer = GsplatRenderer(
+            args.gaussian_ply, config=renderer_config, device=args.device
+        )
+    probe_config = DepthProbeConfig(
+        strategy=args.depth_strategy,
+        max_image_dim=args.probe_max_dim,
+        central_crop_ratio=args.probe_crop_ratio,
+        depth_quantile=args.probe_quantile,
+        alpha_threshold=args.probe_alpha_threshold,
+    )
+    depth_probe = GsplatDepthProbe(renderer=renderer, config=probe_config)
 
     result = generate_candidate_poses(
         captured_cameras=cameras,
@@ -216,19 +210,19 @@ def main() -> None:
         depth_probe=depth_probe,
         config=pose_config,
     )
-    if args.gaussian_ply and not args.no_gs_depth:
-        result.renderer_metadata = {
-            "near_plane": near_plane,
-            "near_plane_strategy": pose_config.renderer_near_plane.strategy,
-            "skybox": renderer.skybox_metadata,
-        }
-        result.diagnostics.update({
-            "renderer_near_plane": near_plane,
-            "skybox_gaussian_count": renderer.skybox_metadata["skybox_gaussians"],
-            "geometry_gaussian_count": renderer.skybox_metadata["geometry_gaussians"],
-            "skybox_fraction": renderer.skybox_metadata["skybox_fraction"],
-            "skybox_detection_confidence": renderer.skybox_metadata["detection_confidence"],
-        })
+    result.renderer_metadata = {
+        "backend": getattr(renderer, "backend_name", "unknown"),
+        "near_plane": near_plane,
+        "near_plane_strategy": pose_config.renderer_near_plane.strategy,
+        "skybox": renderer.skybox_metadata,
+    }
+    result.diagnostics.update({
+        "renderer_near_plane": near_plane,
+        "skybox_gaussian_count": renderer.skybox_metadata["skybox_gaussians"],
+        "geometry_gaussian_count": renderer.skybox_metadata["geometry_gaussians"],
+        "skybox_fraction": renderer.skybox_metadata["skybox_fraction"],
+        "skybox_detection_confidence": renderer.skybox_metadata["detection_confidence"],
+    })
     paths = save_pose_generation_result(result, args.output_dir)
 
     print("=" * 72)
@@ -246,7 +240,7 @@ def main() -> None:
     print()
     print("Visualize with:")
     print(
-        "python -m viewpoint_framework.visualize_cameras "
+        "python -m viewpoint_framework.visualization.cameras "
         f"--point_cloud {args.point_cloud} "
         f"--captured_cameras {args.cameras} "
         f"--generated_cameras {paths['gen_cameras']} "

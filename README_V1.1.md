@@ -62,7 +62,7 @@ The E2E runner loads the Gaussian PLY only once. Stage 2 uses it through `Gsplat
 
 ## 3. Default Stage-3 policy
 
-Default config: `viewpoint_framework/configs/default_stage3.json`
+V3.3 config: `viewpoint_framework/configs/stage3_v3_3.json`
 
 ```text
 Base selection     : angular_fps
@@ -71,7 +71,7 @@ Information gain   : gaussian_visibility (tie-break only)
 Quality band       : none
 Near captured pose : hard duplicate filter only
 Geometric holes    : gaussian_undercoverage
-References         : legacy_global_fps
+References         : position_fps
 Ordering           : grid_order
 num_panos          : 49
 num_refs           : 12
@@ -119,7 +119,7 @@ pointcloud_visibility
 
 Stage 2 already samples the angular grid, so Stage 3 does **not** add cameras to fill 2-D grid/Voronoi gaps.
 
-V1 geometric-hole detection:
+Geometric-hole detection:
 
 1. Load the preselected captured anchors from `--select_view_dir` (normally ~40 views).
 2. Sample opacity-weighted Gaussians from the aligned high-quality 3DGS.
@@ -141,14 +141,14 @@ A second experimental hole strategy is also implemented:
 pointcloud_gaussian_gap
 ```
 
-It treats the aligned point cloud as independent geometry evidence and searches for sampled point-cloud regions that remain farther than a scale-aware threshold from opaque Gaussian support. By default a gap point must also be visible from at least one of the preselected captured anchors, which suppresses isolated feed-forward floaters. This option is closer to a literal reconstruction-geometry hole, while `gaussian_undercoverage` remains the V1 default because it is more conservative.
+It treats the aligned point cloud as independent geometry evidence and searches for sampled point-cloud regions that remain farther than a scale-aware threshold from opaque Gaussian support. By default a gap point must also be visible from at least one of the preselected captured anchors, which suppresses isolated feed-forward floaters. This option is closer to a literal reconstruction-geometry hole, while `gaussian_undercoverage` is more conservative.
 
 Because camera position is inherited from a Stage-2 safe candidate, Stage-2 geometry collision guarantees remain valid. Only orientation/intrinsics change.
 
 ## 6. Selection strategies
 
 ```text
-legacy_position_fps
+position_fps
 angular_fps                 # default
 utility_angular_fps
 greedy_coverage
@@ -165,7 +165,7 @@ captured_seeded             # experimental combined captured+pano angular covera
 
 ## 7. Denoising quality strategy
 
-V1 does **not** infer under-supervision simply from pose distance. `quality_strategy=none` is the default.
+The pipeline does **not** infer under-supervision simply from pose distance. `quality_strategy=none` is the default.
 
 A very conservative duplicate filter removes a generated grid view only when it is both:
 
@@ -204,9 +204,9 @@ These original indices are written as:
 
 Strategies:
 
-### `legacy_global_fps`
+### `position_fps`
 
-Matches the previous panorama generator's position FPS on the reference candidate pool. Original frame 0 is forced if available. Default V1 reference strategy.
+Position FPS on the reference candidate pool. Original frame 0 is forced if available.
 
 ### `target_coverage_greedy`
 
@@ -216,7 +216,7 @@ Greedy facility-location objective over final pano targets:
 maximize Σ_target max_{selected_ref} support(ref, target)
 ```
 
-V1 support combines forward-angle and normalized position similarity. The optimizer is intentionally separate from the metric so a projected-image/render-content support metric can replace it later.
+Support combines forward-angle and normalized position similarity. The optimizer is intentionally separate from the metric so a projected-image/render-content support metric can replace it later.
 
 ### `artifixer_style_covisibility`
 
@@ -229,7 +229,7 @@ No acquisition-mode filtering is applied to reference candidates.
 Selection and ordering are separate.
 
 ```text
-grid_order        # V1 default; preserves Stage-2 grid progression
+grid_order        # preserves Stage-2 grid progression
 nearest_neighbor  # optional pose-continuity experiment
 selection_order
 ```
@@ -295,11 +295,11 @@ bash run_viewpoint_pipeline.sh \
 ## 12. Suggested first ablations
 
 ```text
-A. legacy_position_fps vs angular_fps
+A. position_fps vs angular_fps
 B. generated_only vs captured_seeded
 C. IG none vs gaussian_visibility
 D. holes none vs gaussian_undercoverage vs pointcloud_gaussian_gap
-E. refs legacy_global_fps vs target_coverage_greedy vs artifixer_style_covisibility
+E. refs position_fps vs target_coverage_greedy vs artifixer_style_covisibility
 F. ordering grid_order vs nearest_neighbor
 ```
 

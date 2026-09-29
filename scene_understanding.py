@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.radius_field import (
     DirectionalRadiusField,
     RadiusFieldConfig,
@@ -101,30 +101,6 @@ class SceneUnderstandingConfig:
                 **data.get("center_refinement", {})
             ),
         )
-
-    @classmethod
-    def legacy_camera_only(cls) -> "SceneUnderstandingConfig":
-        """Convenience baseline close to the previous pose-only semantics."""
-
-        return cls(
-            center=CenterEstimationConfig(
-                strategy="legacy_check_alignment",
-            ),
-            mode=ModeAnalysisConfig(
-                strategy="legacy_sign",
-                global_strategy="legacy_majority",
-            ),
-            view_space=ViewSpaceConfig(
-                strategy="legacy_minmax",
-                extension_mode="fixed",
-            ),
-            radius=RadiusFieldConfig(
-                strategy="global_median",
-            ),
-            radius_sampling=RadiusSamplingConfig(),
-            center_refinement=CenterRefinementConfig(),
-        )
-
 
 @dataclass
 class SceneUnderstandingResult:
@@ -259,7 +235,6 @@ def understand_scene(
     cameras: Sequence[Camera],
     config: Optional[SceneUnderstandingConfig] = None,
     point_cloud_points: Optional[np.ndarray] = None,
-    legacy_view_limits: Optional[dict] = None,
     metadata: Optional[dict] = None,
 ) -> SceneUnderstandingResult:
     """Run the complete first-stage scene input understanding pipeline."""
@@ -345,7 +320,6 @@ def understand_scene(
         relations=camera_relations,
         frame=frame,
         config=config.view_space,
-        legacy_view_limits=legacy_view_limits,
     )
 
     # ------------------------------------------------------------------

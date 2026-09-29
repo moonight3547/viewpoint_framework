@@ -1,1 +1,1 @@
-"""Stable utility namespace; root utility imports remain supported."""
+"""Camera, geometry, point-cloud, and runtime utility modules."""

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import load_cameras_json
+from viewpoint_framework.utils.cameras import load_cameras_json
 from viewpoint_framework.gs_renderer import GaussianRendererConfig
 from viewpoint_framework.pose_generation import PoseGenerationConfig, save_cameras_json
 from viewpoint_framework.renderer import create_renderer

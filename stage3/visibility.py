@@ -23,7 +23,7 @@ from typing import Dict, Optional, Sequence
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.gs_renderer import GsplatRenderer
 
 

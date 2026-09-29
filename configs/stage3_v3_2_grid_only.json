@@ -50,7 +50,7 @@
     "gap_require_anchor_visibility": true
   },
   "references": {
-    "strategy": "legacy_global_fps",
+    "strategy": "position_fps",
     "target_angle_sigma_deg": 25.0,
     "target_position_sigma_ratio": 0.35,
     "artifixer_diminishing_return": true

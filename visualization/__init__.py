@@ -1,1 +1,1 @@
-"""V3.3 visualization namespace."""
+"""Interactive visualization and diagnostic CLI modules."""

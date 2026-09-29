@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera, load_cameras_json
+from viewpoint_framework.utils.cameras import Camera, load_cameras_json
+from viewpoint_framework.utils.camera_output_transform import OutputTransformConfig
 from viewpoint_framework.gs_renderer import GsplatRenderer
 from viewpoint_framework.pose_generation import CandidateStatus, PoseGenerationResult
 from viewpoint_framework.scene_types import CameraMode
@@ -57,6 +58,7 @@ class Stage3Config:
     debug_mode: bool = False
     render_pano_depths: bool = False
     geometry_output_contract: bool = False
+    output_transform: OutputTransformConfig = field(default_factory=OutputTransformConfig)
 
     # The selected 40 captured views are expected in --select_view_dir.  This only
     # controls standalone fallback when that directory is not supplied.
@@ -74,11 +76,13 @@ class Stage3Config:
         visibility = VisibilityConfig(**payload.pop("visibility", {}))
         holes = HoleDetectionConfig(**payload.pop("holes", {}))
         references = ReferenceSelectionConfig(**payload.pop("references", {}))
+        output_transform = OutputTransformConfig(**payload.pop("output_transform", {}))
         cfg = cls(**payload)
         cfg.selection = selection
         cfg.visibility = visibility
         cfg.holes = holes
         cfg.references = references
+        cfg.output_transform = output_transform
         return cfg
 
 
@@ -423,6 +427,7 @@ def run_stage3(
         debug_mode=config.debug_mode,
         render_pano_depths=config.render_pano_depths,
         geometry_output_contract=config.geometry_output_contract,
+        portrait_output=config.output_transform.portrait_output,
         stage2_grid_candidates=stage2_candidates,
     )
     return result, paths

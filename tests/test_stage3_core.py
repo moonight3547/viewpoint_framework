@@ -1,6 +1,6 @@
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.stage3.selected_views import load_selected_view_set
 from viewpoint_framework.stage3.selection import (
     SelectionConfig,
@@ -9,7 +9,7 @@ from viewpoint_framework.stage3.selection import (
 )
 from viewpoint_framework.stage3.reference_selection import (
     ReferenceSelectionConfig,
-    legacy_global_fps,
+    position_fps,
     target_coverage_greedy,
 )
 from viewpoint_framework.stage3.render_output import build_frame_manifest
@@ -94,10 +94,10 @@ def test_hole_views_are_forced_into_selection():
     assert len(selected) == 3
 
 
-def test_legacy_reference_fps_keeps_original_indices():
+def test_position_reference_fps_keeps_original_indices():
     cameras = [make_camera(i, [i, 0, 0], [0, 0, 1]) for i in range(8)]
     selected = SelectedViewSet(original_indices=[0, 2, 4, 6], cameras=[cameras[i] for i in [0, 2, 4, 6]])
-    result = legacy_global_fps(selected, cameras, num_refs=3)
+    result = position_fps(selected, cameras, num_refs=3)
     assert len(result.original_indices) == 3
     assert set(result.original_indices).issubset({0, 2, 4, 6})
     assert 0 in result.original_indices

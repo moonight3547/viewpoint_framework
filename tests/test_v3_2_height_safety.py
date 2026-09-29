@@ -18,7 +18,7 @@ from viewpoint_framework.height_safety import (
 )
 from viewpoint_framework.pose_generation_v32 import resolve_final_camera_forward
 from viewpoint_framework.scene_types import CameraMode, SphericalFrame
-from viewpoint_framework.tests.test_pose_generation_synthetic import _camera_at
+from viewpoint_framework.tests.helpers import camera_at
 from viewpoint_framework.trajectory_safe_field import (
     TrajectorySafeField,
     TrajectorySafeFieldConfig,
@@ -36,7 +36,7 @@ def _field(positions, **overrides):
     config = TrajectorySafeFieldConfig(
         rho_strategy="segment_ray_min", **overrides,
     )
-    cameras = [_camera_at(i, p, [0.0, 0.0, 1.0]) for i, p in enumerate(positions)]
+    cameras = [camera_at(i, p, [0.0, 0.0, 1.0]) for i, p in enumerate(positions)]
     return TrajectorySafeField(cameras, np.zeros(3), FRAME, config)
 
 

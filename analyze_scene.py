@@ -10,13 +10,6 @@ python -m viewpoint_framework.analyze_scene \
     --point_cloud pi3_init_aligned.ply \
     --output_dir outputs/scene_analysis \
     --no_serve
-
-Legacy camera-only ablation:
-python -m viewpoint_framework.analyze_scene \
-    --cameras train_cameras.json \
-    --preset legacy \
-    --output_dir outputs/scene_analysis_legacy \
-    --no_serve
 """
 
 from __future__ import annotations
@@ -24,10 +17,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Optional
 
-from viewpoint_framework.cameras_util import load_cameras_json
-from viewpoint_framework.points_util import load_ply_point_cloud
+from viewpoint_framework.utils.cameras import load_cameras_json
+from viewpoint_framework.utils.points import load_ply_point_cloud
 from viewpoint_framework.radius_field import RadiusFieldConfig, RADIUS_STRATEGIES
 from viewpoint_framework.scene_analysis import (
     CENTER_STRATEGIES,
@@ -42,13 +34,9 @@ from viewpoint_framework.scene_understanding import (
     SceneUnderstandingConfig,
     understand_scene,
 )
-from viewpoint_framework.util import serve_html
-from viewpoint_framework.view_space import (
-    BBOX_STRATEGIES,
-    ViewSpaceConfig,
-    load_legacy_view_limits,
-)
-from viewpoint_framework.visualize_scene_analysis import visualize_scene_analysis
+from viewpoint_framework.utils.runtime import serve_html
+from viewpoint_framework.view_space import BBOX_STRATEGIES, ViewSpaceConfig
+from viewpoint_framework.visualization.scene_analysis import visualize_scene_analysis
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -60,7 +48,7 @@ def build_argparser() -> argparse.ArgumentParser:
     )
 
     # ------------------------------------------------------------------
-    # IO / preset.
+    # IO.
     # ------------------------------------------------------------------
     parser.add_argument(
         "--cameras",
@@ -78,12 +66,6 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--view_limits",
-        type=str,
-        default=None,
-        help="Historical view_limits.json; required by legacy_view_limits bbox strategy.",
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         default="scene_analysis",
@@ -93,14 +75,8 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Optional nested strategy config JSON. Precedence: preset < config_json < explicit CLI args."
+            "Optional nested strategy config JSON. Explicit CLI args take precedence."
         ),
-    )
-    parser.add_argument(
-        "--preset",
-        choices=("default", "legacy"),
-        default="default",
-        help="default=improved strategies; legacy=previous camera-only baselines.",
     )
 
     # ------------------------------------------------------------------
@@ -179,8 +155,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--radius_sigma_deg", type=float, default=None)
     parser.add_argument("--radius_max_support_angle_deg", type=float, default=None)
     parser.add_argument("--cone_half_angle_deg", type=float, default=None)
-    parser.add_argument("--legacy_alpha", type=float, default=None)
-    parser.add_argument("--legacy_post_scale", type=float, default=None)
     parser.add_argument("--hybrid_geometry_alpha", type=float, default=None)
     parser.add_argument(
         "--hybrid_rule",
@@ -206,7 +180,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--point_size", type=float, default=1.5)
     parser.add_argument("--point_opacity", type=float, default=0.65)
 
-    # HTTP server, aligned with current visualize_cameras.py behavior.
+    # HTTP server, aligned with visualization.cameras behavior.
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--open_browser", action="store_true")
@@ -215,19 +189,13 @@ def build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_base_config(preset: str) -> SceneUnderstandingConfig:
-    if preset == "legacy":
-        return SceneUnderstandingConfig.legacy_camera_only()
-    return SceneUnderstandingConfig.default()
-
-
 def _override_if_not_none(obj, name: str, value) -> None:
     if value is not None:
         setattr(obj, name, value)
 
 
 def build_config_from_args(args: argparse.Namespace) -> SceneUnderstandingConfig:
-    config = _make_base_config(args.preset)
+    config = SceneUnderstandingConfig.default()
 
     if args.config_json:
         config_path = Path(args.config_json).expanduser().resolve()
@@ -319,12 +287,6 @@ def build_config_from_args(args: argparse.Namespace) -> SceneUnderstandingConfig
         "cone_half_angle_deg",
         args.cone_half_angle_deg,
     )
-    _override_if_not_none(config.radius, "legacy_alpha", args.legacy_alpha)
-    _override_if_not_none(
-        config.radius,
-        "legacy_post_scale",
-        args.legacy_post_scale,
-    )
     _override_if_not_none(
         config.radius,
         "hybrid_geometry_alpha",
@@ -392,10 +354,7 @@ def main() -> None:
 
     config = build_config_from_args(args)
 
-    if config.view_space.strategy == "legacy_view_limits" and not args.view_limits:
-        parser.error("--view_limits is required for --bbox_strategy legacy_view_limits")
-
-    if config.radius.strategy in ("legacy_pointcloud_rule", "pointcloud_cone", "hybrid") and not args.point_cloud:
+    if config.radius.strategy in ("pointcloud_cone", "hybrid") and not args.point_cloud:
         parser.error(
             f"--point_cloud is required for radius strategy {config.radius.strategy}"
         )
@@ -405,12 +364,8 @@ def main() -> None:
 
     cameras = load_cameras_json(args.cameras)
 
-    legacy_view_limits: Optional[dict] = None
-    if args.view_limits:
-        legacy_view_limits = load_legacy_view_limits(args.view_limits)
-
     point_cloud_points = None
-    if args.point_cloud and config.radius.strategy in ("legacy_pointcloud_rule", "pointcloud_cone", "hybrid"):
+    if args.point_cloud and config.radius.strategy in ("pointcloud_cone", "hybrid"):
         analysis_cloud = load_ply_point_cloud(
             args.point_cloud,
             max_points=args.radius_pointcloud_max_points,
@@ -421,7 +376,6 @@ def main() -> None:
         cameras=cameras,
         config=config,
         point_cloud_points=point_cloud_points,
-        legacy_view_limits=legacy_view_limits,
         metadata={
             "camera_json": str(Path(args.cameras).expanduser().resolve()),
             "point_cloud": (
@@ -429,12 +383,6 @@ def main() -> None:
                 if args.point_cloud
                 else None
             ),
-            "view_limits": (
-                str(Path(args.view_limits).expanduser().resolve())
-                if args.view_limits
-                else None
-            ),
-            "preset": args.preset,
         },
     )
 

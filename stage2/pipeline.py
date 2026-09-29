@@ -7,7 +7,7 @@ from viewpoint_framework.geometry_safety import PointCloudSafety, local_clearanc
 from viewpoint_framework.pose_generation import (
     CandidateStatus, GeneratedCandidate, PoseGenerationResult, build_generated_camera,
 )
-from viewpoint_framework.pose_generation_v3 import initial_position_from_rho
+from viewpoint_framework.stage2.placement import initial_position_from_rho
 from viewpoint_framework.scene_types import CameraMode, to_jsonable
 from viewpoint_framework.stage2.height import (
     effective_height, probe_local_height, resolve_global_height,

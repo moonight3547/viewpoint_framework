@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.stage3.selection import angular_distance_rad
 from viewpoint_framework.stage3.types import ReferenceSelectionResult, SelectedViewSet
 from viewpoint_framework.stage3.visibility import NullVisibilityModel, VisibilityModel
@@ -35,7 +35,7 @@ EPS = 1e-10
 
 @dataclass
 class ReferenceSelectionConfig:
-    strategy: str = "legacy_global_fps"  # legacy_global_fps | target_coverage_greedy | artifixer_style_covisibility
+    strategy: str = "position_fps"  # position_fps | target_coverage_greedy | artifixer_style_covisibility
     target_angle_sigma_deg: float = 25.0
     target_position_sigma_ratio: float = 0.35
     artifixer_diminishing_return: bool = True
@@ -47,19 +47,19 @@ def _pool(selected_views: SelectedViewSet, captured_cameras: Sequence[Camera]):
     return [int(c.index) for c in captured_cameras], list(captured_cameras)
 
 
-def legacy_global_fps(
+def position_fps(
     selected_views: SelectedViewSet,
     captured_cameras: Sequence[Camera],
     num_refs: int,
 ) -> ReferenceSelectionResult:
-    """Match the previous panorama generator's position-FPS reference baseline."""
+    """Select captured references with position-space farthest-point sampling."""
     indices, cameras = _pool(selected_views, captured_cameras)
     num_refs = max(0, min(int(num_refs), len(cameras)))
     if num_refs == 0:
-        return ReferenceSelectionResult("legacy_global_fps", [], indices)
+        return ReferenceSelectionResult("position_fps", [], indices)
     if len(cameras) <= num_refs:
         chosen = sorted(indices)
-        return ReferenceSelectionResult("legacy_global_fps", chosen, indices)
+        return ReferenceSelectionResult("position_fps", chosen, indices)
 
     positions = np.stack([c.position for c in cameras], axis=0)
     # Previous code forces original frame 0 if present; otherwise candidate closest
@@ -81,7 +81,7 @@ def legacy_global_fps(
         )
     chosen = sorted(int(indices[i]) for i in chosen_local)
     return ReferenceSelectionResult(
-        strategy="legacy_global_fps",
+        strategy="position_fps",
         original_indices=chosen,
         candidate_pool_indices=indices,
     )
@@ -119,8 +119,8 @@ def target_coverage_greedy(
 ) -> ReferenceSelectionResult:
     """Greedy facility-location support of final pano targets.
 
-    Objective: maximize sum_t max_{r in R} support(r, t).  It is a robust V1
-    target-conditioned reference selector and can later swap in render/content
+    Objective: maximize sum_t max_{r in R} support(r, t). The target-conditioned
+    selector can later swap in render/content
     similarity without changing the greedy optimizer.
     """
     indices, refs = _pool(selected_views, captured_cameras)
@@ -178,7 +178,7 @@ def artifixer_style_covisibility(
     indices, refs = _pool(selected_views, captured_cameras)
     num_refs = max(0, min(int(num_refs), len(refs)))
     if isinstance(visibility_model, NullVisibilityModel) or len(visibility_model.sample_points) == 0:
-        return legacy_global_fps(selected_views, captured_cameras, num_refs)
+        return position_fps(selected_views, captured_cameras, num_refs)
 
     matrix = visibility_model.visibility_matrix(refs, key_prefix="ref_artifixer_style")
     counts = np.zeros(matrix.shape[1], dtype=np.int32)
@@ -230,8 +230,8 @@ def select_references(
 ) -> ReferenceSelectionResult:
     config = config or ReferenceSelectionConfig()
     visibility_model = visibility_model or NullVisibilityModel()
-    if config.strategy == "legacy_global_fps":
-        return legacy_global_fps(selected_views, captured_cameras, num_refs)
+    if config.strategy == "position_fps":
+        return position_fps(selected_views, captured_cameras, num_refs)
     if config.strategy == "target_coverage_greedy":
         return target_coverage_greedy(
             selected_views,

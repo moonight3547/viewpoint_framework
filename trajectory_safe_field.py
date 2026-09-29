@@ -10,7 +10,7 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.scene_types import SphericalFrame
 
 EPS = 1e-10
@@ -24,8 +24,7 @@ class TrajectorySafeFieldConfig:
     max_angular_gap_deg: float = 30.0
     tube_radius_ratio: float = 0.04
     unsupported_behavior: str = "nearest_limited"  # nearest_limited | reject
-    rho_strategy: str = "v3_1"  # v3_1 | segment_ray_min
-    fallback_strategy: str = "v3_1"
+    rho_strategy: str = "segment_ray_min"
     fallback_confidence_threshold: float = 0.2
 
     def validate(self) -> None:
@@ -40,25 +39,10 @@ class TrajectorySafeFieldConfig:
             raise ValueError("tube_radius_ratio must be < 1.")
         if self.unsupported_behavior not in ("nearest_limited", "reject"):
             raise ValueError("Unsupported trajectory fallback policy.")
-        if self.rho_strategy not in ("v3_1", "segment_ray_min"):
-            raise ValueError("Unsupported trajectory rho strategy.")
-        if self.fallback_strategy != "v3_1":
-            raise ValueError("Only the V3.1 trajectory fallback is supported.")
+        if self.rho_strategy != "segment_ray_min":
+            raise ValueError("Only rho_strategy='segment_ray_min' is supported.")
         if not 0.0 <= self.fallback_confidence_threshold <= 1.0:
             raise ValueError("fallback_confidence_threshold must be in [0,1].")
-
-
-@dataclass
-class HeightGuardConfig:
-    enabled: bool = False  # V3.0 experiment stub; positional elevation stays active.
-    margin_ratio: float = 0.05
-
-    def allows(self, height: float, interval: "TrajectorySupportInterval") -> bool:
-        if not np.isfinite(self.margin_ratio) or self.margin_ratio < 0:
-            raise ValueError("Height margin ratio must be finite and nonnegative.")
-        margin = self.margin_ratio * interval.rho_preferred
-        return bool(np.isfinite(height) and
-                    interval.height_min - margin <= height <= interval.height_max + margin)
 
 
 @dataclass
@@ -298,7 +282,7 @@ class TrajectorySafeField:
         return AzimuthTrajectorySupport(
             azimuth_deg=az, rho=float(selected.rho_preferred),
             rho_source=("trajectory_fallback_low_confidence" if low_confidence
-                        else "trajectory_fallback_v3_1"),
+                        else "trajectory_interval_fallback"),
             direct_intersection_count=0,
             selected_segment_start_index=None, selected_segment_end_index=None,
             selected_segment_t=None,

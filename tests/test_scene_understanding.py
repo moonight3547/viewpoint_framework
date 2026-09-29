@@ -5,7 +5,7 @@
 
 import numpy as np
 
-from viewpoint_framework.cameras_util import Camera
+from viewpoint_framework.utils.cameras import Camera
 from viewpoint_framework.scene_types import GlobalCollectionMode
 from viewpoint_framework.radius_field import DirectionalRadiusField, RadiusFieldConfig
 from viewpoint_framework.scene_types import CameraMode, CameraSceneRelation
@@ -154,22 +154,3 @@ def test_circular_bbox_wraparound():
     interval = minimal_circular_interval([175.0, 179.0, -178.0, -174.0])
     assert interval.wraps
     assert interval.span_deg == 11.0
-
-
-def test_strict_legacy_first_camera_target_behavior():
-    """Legacy check_camera_alignment can accept origin even if true center differs."""
-
-    true_center = np.array([1.0, 0.0, 0.0])
-
-    # First camera deliberately looks exactly toward world origin, reproducing
-    # the historical early-accept condition.
-    first_position = np.array([0.0, 0.0, 2.0])
-    first_forward = -first_position / np.linalg.norm(first_position)
-    cameras = [_camera(0, first_position, first_forward)]
-    cameras.extend(_ring(true_center, inside_out=False, count=8))
-
-    config = SceneUnderstandingConfig.legacy_camera_only()
-    result = understand_scene(cameras, config)
-
-    assert np.linalg.norm(result.profile.center_fit.center) < 1e-8
-    assert result.profile.center_fit.strategy == "legacy_check_alignment"
