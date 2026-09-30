@@ -9,7 +9,7 @@
     "portrait_output": "off"
   },
   "blocks": {
-    "mode": "off",
+    "mode": "content",
     "strategy": "balanced_content_visibility",
     "trunk_frames": 7,
     "target_chunks": 4,

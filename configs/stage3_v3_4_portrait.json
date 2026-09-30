@@ -6,7 +6,26 @@
   "render_pano_depths": false,
   "geometry_output_contract": true,
   "output_transform": {
-    "portrait_output": "auto_cw90"
+    "portrait_output": "auto"
+  },
+  "blocks": {
+    "mode": "content",
+    "strategy": "balanced_content_visibility",
+    "trunk_frames": 7,
+    "target_chunks": 4,
+    "min_chunks": 2,
+    "max_chunks": 6,
+    "frame_count_policy": "trim_low_value",
+    "descriptor": "gaussian_visibility",
+    "content_weight": 0.75,
+    "references": {
+      "strategy": "block_target_coverage",
+      "max_refs": 6,
+      "pool": "selected_only",
+      "fill_to_max_refs": false,
+      "min_reference_count": 1,
+      "low_support_action": "warn_and_record"
+    }
   },
   "selection": {
     "strategy": "angular_fps",

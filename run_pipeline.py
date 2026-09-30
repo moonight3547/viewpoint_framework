@@ -49,8 +49,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--pose_config_json", default=None)
     p.add_argument("--stage3_config_json", default=None)
 
-    p.add_argument("--num_panos", type=int, default=49)
-    p.add_argument("--num_refs", type=int, default=12)
+    p.add_argument("--num_panos", type=int, default=None)
+    p.add_argument("--num_refs", type=int, default=None)
     p.add_argument("--debug-mode", action="store_true")
     p.add_argument("--device", default="auto")
     p.add_argument(
@@ -64,11 +64,14 @@ def build_argparser() -> argparse.ArgumentParser:
               "V3.3 ordering; bypasses selection/downsampling."))
     p.add_argument(
         "--portrait-output",
-        choices=("off", "auto_cw90", "auto_ccw90"),
+        choices=("off", "auto", "auto_cw90", "auto_ccw90"),
         default=None,
-        help=("Rotate final landscape pano rasters/cameras into portrait orientation. "
+        help=("Render final landscape cameras on a portrait viewport. "
               "This does not change Stage 1/2 poses or selection."),
     )
+    p.add_argument("--block-mode", choices=("off", "content"), default=None)
+    p.add_argument("--block-max-refs", type=int, default=None)
+    p.add_argument("--block-trunk-frames", type=int, default=None)
 
     # Stage-2 high-value overrides.
     p.add_argument("--mode", choices=("auto", "outside_in", "inside_out"), default="auto")
@@ -127,8 +130,10 @@ def _build_configs(args):
     stage3_cfg = Stage3Config.from_dict(
         _load_json(args.stage3_config_json or str(config_dir / "stage3_v3_3.json"))
     )
-    stage3_cfg.num_panos = int(args.num_panos)
-    stage3_cfg.num_refs = int(args.num_refs)
+    if args.num_panos is not None:
+        stage3_cfg.num_panos = int(args.num_panos)
+    if args.num_refs is not None:
+        stage3_cfg.num_refs = int(args.num_refs)
     stage3_cfg.debug_mode = bool(args.debug_mode)
     stage3_cfg.render_pano_depths = bool(
         args.render_pano_depths or pose_cfg.renderer.render_pano_depths)
@@ -139,6 +144,13 @@ def _build_configs(args):
         stage3_cfg.output_all_stage2_candidates = True
     if args.portrait_output is not None:
         stage3_cfg.output_transform.portrait_output = args.portrait_output
+    if args.block_mode is not None:
+        stage3_cfg.blocks.mode = args.block_mode
+    if args.block_max_refs is not None:
+        stage3_cfg.blocks.references.max_refs = int(args.block_max_refs)
+    if args.block_trunk_frames is not None:
+        stage3_cfg.blocks.trunk_frames = int(args.block_trunk_frames)
+    stage3_cfg.blocks.validate()
     if args.selection_strategy:
         stage3_cfg.selection.strategy = args.selection_strategy
     if args.selection_reference:

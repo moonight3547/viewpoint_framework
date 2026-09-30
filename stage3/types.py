@@ -98,6 +98,25 @@ class ReferenceSelectionResult:
 
 
 @dataclass
+class PanoBlock:
+    block_id: int
+    candidates: List[SelectionCandidate]
+    start_index: int
+    reference_original_indices: List[int] = field(default_factory=list)
+    descriptor_strategy: str = "pose_fallback"
+    coverage_metrics: Dict[str, Any] = field(default_factory=dict)
+    ordering_metrics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BlockPlan:
+    blocks: List[PanoBlock]
+    dropped_candidate_ids: List[int]
+    frame_count_policy: str
+    config: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Stage3Result:
     selected_candidates: List[SelectionCandidate]
     selected_cameras: List[Camera]
@@ -106,6 +125,7 @@ class Stage3Result:
     holes: List[HoleCluster]
     hole_views: List[HoleViewRecord]
     debug: Dict[str, Any] = field(default_factory=dict)
+    block_plan: Optional[BlockPlan] = None
 
 
 def to_jsonable(value: Any) -> Any:

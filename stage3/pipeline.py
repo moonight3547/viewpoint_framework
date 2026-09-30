@@ -23,6 +23,10 @@ from viewpoint_framework.stage3.hole_detection import (
     detect_pointcloud_gaussian_gaps,
     generate_focused_hole_views,
 )
+from viewpoint_framework.stage3.block_partition import (
+    BlockConfig,
+    plan_content_blocks,
+)
 from viewpoint_framework.stage3.reference_selection import (
     ReferenceSelectionConfig,
     select_references,
@@ -36,6 +40,7 @@ from viewpoint_framework.stage3.selection import (
 )
 from viewpoint_framework.stage3.types import (
     CandidateOrigin,
+    ReferenceSelectionResult,
     SelectionCandidate,
     Stage3Result,
 )
@@ -59,6 +64,7 @@ class Stage3Config:
     render_pano_depths: bool = False
     geometry_output_contract: bool = False
     output_transform: OutputTransformConfig = field(default_factory=OutputTransformConfig)
+    blocks: BlockConfig = field(default_factory=BlockConfig)
 
     # The selected 40 captured views are expected in --select_view_dir.  This only
     # controls standalone fallback when that directory is not supplied.
@@ -77,12 +83,14 @@ class Stage3Config:
         holes = HoleDetectionConfig(**payload.pop("holes", {}))
         references = ReferenceSelectionConfig(**payload.pop("references", {}))
         output_transform = OutputTransformConfig(**payload.pop("output_transform", {}))
+        blocks = BlockConfig.from_dict(payload.pop("blocks", {}))
         cfg = cls(**payload)
         cfg.selection = selection
         cfg.visibility = visibility
         cfg.holes = holes
         cfg.references = references
         cfg.output_transform = output_transform
+        cfg.blocks = blocks
         return cfg
 
 
@@ -366,14 +374,47 @@ def run_stage3(
             config=config.selection,
             visibility_model=selection_model,
         )
-    selected = order_selected_views(
-        selected, config.selection, grid_row_bounds=grid_row_bounds)
+    block_plan = None
+    if config.blocks.mode == "content":
+        block_visibility_model: VisibilityModel = NullVisibilityModel()
+        if config.blocks.descriptor == "gaussian_visibility":
+            if shared_gaussian_model is None:
+                shared_gaussian_model = _visibility_model_for_strategy(
+                    "gaussian_visibility",
+                    renderer=renderer,
+                    point_cloud_points=point_cloud_points,
+                    scene_scale=scene_scale,
+                    config=config.visibility,
+                )
+            block_visibility_model = shared_gaussian_model
+        elif config.blocks.descriptor == "pointcloud_visibility":
+            block_visibility_model = _visibility_model_for_strategy(
+                "pointcloud_visibility",
+                renderer=renderer,
+                point_cloud_points=point_cloud_points,
+                scene_scale=scene_scale,
+                config=config.visibility,
+            )
+        elif config.blocks.descriptor != "pose_fallback":
+            raise ValueError(f"Unknown block descriptor: {config.blocks.descriptor}")
+        block_plan = plan_content_blocks(
+            selected,
+            scene_scale=scene_scale,
+            visibility_model=block_visibility_model,
+            config=config.blocks,
+        )
+        selected = [candidate for block in block_plan.blocks for candidate in block.candidates]
+    else:
+        selected = order_selected_views(
+            selected, config.selection, grid_row_bounds=grid_row_bounds)
     selected_cameras = [c.camera for c in selected]
 
     # Reference selector can reuse the Gaussian visibility model already computed
     # for holes.  Create it lazily only for the ArtiFixer-style strategy.
     ref_model: VisibilityModel = NullVisibilityModel()
-    if config.references.strategy == "artifixer_style_covisibility":
+    if (config.references.strategy == "artifixer_style_covisibility"
+            or (block_plan is not None
+                and config.blocks.references.strategy == "block_target_coverage")):
         if shared_gaussian_model is None:
             shared_gaussian_model = _visibility_model_for_strategy(
                 "gaussian_visibility",
@@ -384,15 +425,50 @@ def run_stage3(
             )
         ref_model = shared_gaussian_model
 
-    ref_result = select_references(
-        selected_views,
-        captured_cameras,
-        selected_cameras,
-        num_refs=config.num_refs,
-        scene_scale=scene_scale,
-        config=config.references,
-        visibility_model=ref_model,
-    )
+    if block_plan is None:
+        ref_result = select_references(
+            selected_views,
+            captured_cameras,
+            selected_cameras,
+            num_refs=config.num_refs,
+            scene_scale=scene_scale,
+            config=config.references,
+            visibility_model=ref_model,
+        )
+    else:
+        block_reference_config = ReferenceSelectionConfig(**asdict(config.references))
+        if config.blocks.references.strategy == "block_target_coverage":
+            block_reference_config.strategy = "block_target_coverage"
+        elif config.blocks.references.strategy in (
+                "position_fps", "target_coverage_greedy", "artifixer_style_covisibility"):
+            block_reference_config.strategy = config.blocks.references.strategy
+        else:
+            raise ValueError(
+                "Unknown block reference strategy: "
+                f"{config.blocks.references.strategy}"
+            )
+        union_indices = set()
+        block_scores = {}
+        for block in block_plan.blocks:
+            block_result = select_references(
+                selected_views,
+                captured_cameras,
+                [candidate.camera for candidate in block.candidates],
+                num_refs=config.blocks.references.max_refs,
+                scene_scale=scene_scale,
+                config=block_reference_config,
+                visibility_model=ref_model,
+            )
+            block.reference_original_indices = list(block_result.original_indices)
+            block.coverage_metrics["reference_selection"] = block_result.scores
+            union_indices.update(block_result.original_indices)
+            block_scores[str(block.block_id)] = block_result.scores
+        ref_result = ReferenceSelectionResult(
+            strategy="block_summary",
+            original_indices=sorted(union_indices),
+            candidate_pool_indices=list(selected_views.original_indices),
+            scores={"blocks": block_scores},
+        )
 
     debug = {
         "scene_scale": scene_scale,
@@ -419,6 +495,7 @@ def run_stage3(
         holes=holes,
         hole_views=hole_records,
         debug=debug,
+        block_plan=block_plan,
     )
     paths = save_stage3_outputs(
         result,

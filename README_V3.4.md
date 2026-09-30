@@ -1,61 +1,64 @@
 # Viewpoint Framework V3.4
 
-V3.4 builds on the frozen V3.3 expanded-view candidate set. It does not add a
-new pose-generation version and does not change Stage 1 or Stage 2 geometry,
-depth safety, skybox handling, or renderer activation contracts.
+V3.4 is a Stage 3 experiment over the existing V3.2/V3.3 pose-generation
+strategies. It does not introduce `pose_generation_v34.py` or change Stage 2
+geometry safety.
 
-The first implemented V3.4 experiment is optional portrait output. Content
-blocks and block-local references remain a later experiment and are not
-silently approximated by sequential slicing in this version.
+## Portrait viewport
 
-## Version boundaries
+`portrait_output=auto` keeps `w2c`, `c2w`, `fx`, and `fy` unchanged. For a
+landscape camera it changes the render canvas from `W x H` to `H x W` and
+preserves the principal-point offset from the canvas center. The renderer then
+samples the portrait view directly: horizontal coverage becomes narrower and
+vertical coverage becomes wider around the same optical-axis content.
 
-- V3.2 pose generation remains directly selectable with
-  `configs/v3_2_pose_generation.json`.
-- V3.3 pose generation remains directly selectable with
-  `configs/v3_3_pose_generation.json`. Its default is the V3.3 angular grid
-  with validated V3.2 placement; native V3.3 placement remains available via
-  `v33_placement_strategy=v3_3`.
-- V3.4 is currently a Stage 3 output experiment. The portrait CLI override can
-  be combined with either version's own Stage 3 config. The bundled
-  `stage3_v3_4*.json` configs specifically extend the V3.3 Stage 3 baseline.
+No raster rotation or camera roll is performed. The former `auto_cw90` and
+`auto_ccw90` values remain compatibility aliases for `auto` so old batch
+commands do not fail, but they no longer rotate the image.
 
-No `pose_generation_v34.py` exists by design.
+References listed by `traj_refs.json` retain their original resolution and
+orientation. Their cross-attention use belongs to the downstream pipeline.
 
-## Portrait output
+## Content blocks
 
-`output_transform.portrait_output` accepts:
+`block_mode=content` operates on the final safe Stage 2 target set:
 
-- `off`: exact legacy output behavior.
-- `auto_cw90`: rotate only landscape frames clockwise.
-- `auto_ccw90`: rotate only landscape frames counter-clockwise.
+1. Build geometry-visibility affinity, with an explicitly recorded pose-only
+   fallback if visibility rendering is unavailable.
+2. Trim at most six redundant targets so the output count is divisible by 7.
+3. Produce balanced content blocks, normally targeting 28 frames per block.
+4. Order views locally inside each block.
+5. Select at most six original captured references per block using geometry
+   target recall, with a recorded pose fallback.
 
-The transform is applied after final selection and ordering. Each original
-camera is rendered once, then RGB, alpha, and optional depth arrays are rotated
-together. `pano_cameras.json` records the matching rotated image-plane camera.
-Camera position and world-space forward direction do not change.
+For example, 160 valid targets become 154 outputs with block lengths
+`[28,28,28,28,21,21]`; 168 targets become six 28-frame blocks.
 
-When portrait mode is enabled, `pano_frame_manifest.json` contains both the
-source camera and the output camera plus each frame's applied rotation.
-`output_transform.json` records the output contract. `traj_refs.json` only
-selects original `train_cameras.json` indices. Captured references keep their
-original resolution and orientation; this framework neither rotates nor
-rewrites them. Their use is owned by the downstream cross-attention pipeline.
+Block outputs remain flat and globally numbered. The output contract adds:
 
-## Configs
+- `traj_lens.json`: one 7-aligned length per block.
+- `traj_refs.json`: one list of original captured-camera indices per block.
+- `pano_blocks.json`: candidate IDs, offsets, references and diagnostics.
+- `pano_frame_manifest.json`: `block_id`, local index and trunk index.
 
-- `configs/stage3_v3_4.json`: compatibility baseline, portrait disabled.
-- `configs/stage3_v3_4_portrait.json`: clockwise portrait experiment.
+## Configs and CLI
 
-The CLI can override either config with:
+- `configs/stage3_v3_4.json`: compatibility baseline; portrait and blocks off.
+- `configs/stage3_v3_4_blocks.json`: full V3.3 targets with content blocks.
+- `configs/stage3_v3_4_portrait.json`: full targets, content blocks and portrait
+  viewport.
+
+Important overrides:
 
 ```text
---portrait-output {off,auto_cw90,auto_ccw90}
+--portrait-output {off,auto,auto_cw90,auto_ccw90}
+--block-mode {off,content}
+--block-max-refs 6
+--block-trunk-frames 7
+--all-generated-frames
 ```
 
-## Examples
-
-V3.3 candidate generation with V3.4 portrait output:
+V3.3 portrait + blocks:
 
 ```bash
 python -m viewpoint_framework.run_pipeline \
@@ -63,40 +66,12 @@ python -m viewpoint_framework.run_pipeline \
   --point_cloud pi3_init_aligned.ply \
   --gaussian_ply point_cloud_final.ply \
   --pose_config_json viewpoint_framework/configs/v3_3_pose_generation.json \
-  --stage3_config_json viewpoint_framework/configs/stage3_v3_4.json \
-  --portrait-output auto_cw90 \
-  --output_dir outputs/v3_4_portrait
+  --stage3_config_json viewpoint_framework/configs/stage3_v3_4_portrait.json \
+  --output_dir outputs/v3_4
 ```
 
-The same output experiment over the V3.2 strategy:
-
-```bash
-python -m viewpoint_framework.run_pipeline \
-  --cameras train_cameras.json \
-  --point_cloud pi3_init_aligned.ply \
-  --gaussian_ply point_cloud_final.ply \
-  --pose_config_json viewpoint_framework/configs/v3_2_pose_generation.json \
-  --stage3_config_json viewpoint_framework/configs/stage3_v3_2_grid_only.json \
-  --portrait-output auto_cw90 \
-  --output_dir outputs/v3_2_v3_4_portrait
-```
-
-For an off/off V3.3 baseline, keep using `configs/stage3_v3_3.json`, or use
-`stage3_v3_4.json` without a portrait override. This preserves the existing
-single reference row and single trajectory length schema.
-
-## Deferred block experiment
-
-Content-aware partitioning requires geometry visibility/co-visibility,
-7-frame divisibility, block-local ordering, and per-block captured-reference
-selection. It is intentionally not exposed yet: a fake `content` mode based on
-consecutive frame chunks would make later denoising results difficult to
-interpret. Generated frames reused as context will also use a separate future
-contract rather than being mixed into captured `traj_refs` indices.
-
-## Validation
-
-Synthetic tests cover clockwise/counter-clockwise projection mapping, camera
-center and forward invariants, rotation round-trip, landscape-only behavior,
-and exact raster rotation. The renderer backend comparison issue inherited
-from V3.3 remains separate from this output transform.
+V3.2 remains directly selectable with
+`configs/v3_2_pose_generation.json`; V3.3 remains directly selectable with
+`configs/v3_3_pose_generation.json`. The shell wrapper now leaves Stage 3
+config values untouched unless the corresponding environment override is
+explicitly supplied.

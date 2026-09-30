@@ -53,9 +53,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--view_limits", default=None, help="Defaults to output_dir/view_limits.json")
     p.add_argument("--config_json", default=None)
 
-    p.add_argument("--num_panos", type=int, default=49)
-    p.add_argument("--num_refs", type=int, default=12)
+    p.add_argument("--num_panos", type=int, default=None)
+    p.add_argument("--num_refs", type=int, default=None)
     p.add_argument("--debug-mode", action="store_true")
+    p.add_argument("--all-generated-frames", action="store_true")
+    p.add_argument(
+        "--portrait-output",
+        choices=("off", "auto", "auto_cw90", "auto_ccw90"),
+        default=None,
+    )
+    p.add_argument("--block-mode", choices=("off", "content"), default=None)
+    p.add_argument("--block-max-refs", type=int, default=None)
+    p.add_argument("--block-trunk-frames", type=int, default=None)
 
     p.add_argument(
         "--selection-strategy",
@@ -84,7 +93,7 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--ordering-strategy",
-        choices=("grid_order", "nearest_neighbor", "selection_order"),
+        choices=("grid_order", "nearest_neighbor", "selection_order", "elevation_center_out"),
         default=None,
     )
     p.add_argument("--device", default="auto")
@@ -98,9 +107,21 @@ def _config(args: argparse.Namespace) -> Stage3Config:
     cfg = Stage3Config()
     if args.config_json:
         cfg = Stage3Config.from_dict(_load_json(args.config_json))
-    cfg.num_panos = int(args.num_panos)
-    cfg.num_refs = int(args.num_refs)
+    if args.num_panos is not None:
+        cfg.num_panos = int(args.num_panos)
+    if args.num_refs is not None:
+        cfg.num_refs = int(args.num_refs)
     cfg.debug_mode = bool(args.debug_mode)
+    if args.all_generated_frames:
+        cfg.output_all_stage2_candidates = True
+    if args.portrait_output is not None:
+        cfg.output_transform.portrait_output = args.portrait_output
+    if args.block_mode is not None:
+        cfg.blocks.mode = args.block_mode
+    if args.block_max_refs is not None:
+        cfg.blocks.references.max_refs = int(args.block_max_refs)
+    if args.block_trunk_frames is not None:
+        cfg.blocks.trunk_frames = int(args.block_trunk_frames)
     if args.selection_strategy:
         cfg.selection.strategy = args.selection_strategy
     if args.selection_reference:
@@ -117,6 +138,7 @@ def _config(args: argparse.Namespace) -> Stage3Config:
         cfg.visibility.max_samples = int(args.visibility_samples)
     if args.visibility_max_dim is not None:
         cfg.visibility.max_image_dim = int(args.visibility_max_dim)
+    cfg.blocks.validate()
     return cfg
 
 

@@ -34,8 +34,8 @@ GAUSSIAN_PLY="$(resolve_path "$GAUSSIAN_PLY")"
 SELECT_VIEW_DIR="$(resolve_path "$SELECT_VIEW_DIR")"
 OUTPUT_DIR="$(resolve_path "$OUTPUT_DIR")"
 
-NUM_PANOS="${NUM_PANOS:-49}"
-NUM_REFS="${NUM_REFS:-12}"
+NUM_PANOS="${NUM_PANOS:-}"
+NUM_REFS="${NUM_REFS:-}"
 DEBUG_MODE="${DEBUG_MODE:-0}"
 DEVICE="${DEVICE:-auto}"
 
@@ -44,13 +44,15 @@ POSE_CONFIG="${POSE_CONFIG:-$REPO_DIR/configs/v3_3_pose_generation.json}"
 STAGE3_CONFIG="${STAGE3_CONFIG:-$REPO_DIR/configs/stage3_v3_3.json}"
 
 MODE="${MODE:-auto}"
-GRID_GAP="${GRID_GAP:-20}"
-SELECTION_STRATEGY="${SELECTION_STRATEGY:-angular_fps}"
-SELECTION_REFERENCE="${SELECTION_REFERENCE:-generated_only}"
-INFORMATION_GAIN="${INFORMATION_GAIN:-gaussian_visibility}"
-HOLE_STRATEGY="${HOLE_STRATEGY:-gaussian_undercoverage}"
-REFERENCE_STRATEGY="${REFERENCE_STRATEGY:-position_fps}"
-ORDERING_STRATEGY="${ORDERING_STRATEGY:-grid_order}"
+GRID_GAP="${GRID_GAP:-}"
+SELECTION_STRATEGY="${SELECTION_STRATEGY:-}"
+SELECTION_REFERENCE="${SELECTION_REFERENCE:-}"
+INFORMATION_GAIN="${INFORMATION_GAIN:-}"
+HOLE_STRATEGY="${HOLE_STRATEGY:-}"
+REFERENCE_STRATEGY="${REFERENCE_STRATEGY:-}"
+ORDERING_STRATEGY="${ORDERING_STRATEGY:-}"
+PORTRAIT_OUTPUT="${PORTRAIT_OUTPUT:-}"
+BLOCK_MODE="${BLOCK_MODE:-}"
 
 cd "$PARENT_DIR"
 
@@ -64,18 +66,25 @@ CMD=(
     --scene_config_json "$SCENE_CONFIG"
     --pose_config_json "$POSE_CONFIG"
     --stage3_config_json "$STAGE3_CONFIG"
-    --num_panos "$NUM_PANOS"
-    --num_refs "$NUM_REFS"
     --device "$DEVICE"
     --mode "$MODE"
-    --grid_gap "$GRID_GAP"
-    --selection-strategy "$SELECTION_STRATEGY"
-    --selection-reference "$SELECTION_REFERENCE"
-    --information-gain "$INFORMATION_GAIN"
-    --hole-strategy "$HOLE_STRATEGY"
-    --reference-strategy "$REFERENCE_STRATEGY"
-    --ordering-strategy "$ORDERING_STRATEGY"
 )
+
+[[ -n "$NUM_PANOS" ]] && CMD+=(--num_panos "$NUM_PANOS")
+[[ -n "$NUM_REFS" ]] && CMD+=(--num_refs "$NUM_REFS")
+[[ -n "$GRID_GAP" ]] && CMD+=(--grid_gap "$GRID_GAP")
+[[ -n "$SELECTION_STRATEGY" ]] && CMD+=(--selection-strategy "$SELECTION_STRATEGY")
+[[ -n "$SELECTION_REFERENCE" ]] && CMD+=(--selection-reference "$SELECTION_REFERENCE")
+[[ -n "$INFORMATION_GAIN" ]] && CMD+=(--information-gain "$INFORMATION_GAIN")
+[[ -n "$HOLE_STRATEGY" ]] && CMD+=(--hole-strategy "$HOLE_STRATEGY")
+[[ -n "$REFERENCE_STRATEGY" ]] && CMD+=(--reference-strategy "$REFERENCE_STRATEGY")
+[[ -n "$ORDERING_STRATEGY" ]] && CMD+=(--ordering-strategy "$ORDERING_STRATEGY")
+[[ -n "$PORTRAIT_OUTPUT" ]] && CMD+=(--portrait-output "$PORTRAIT_OUTPUT")
+[[ -n "$BLOCK_MODE" ]] && CMD+=(--block-mode "$BLOCK_MODE")
+
+if [[ "${ALL_GENERATED_FRAMES:-0}" == "1" || "${ALL_GENERATED_FRAMES:-}" == "true" ]]; then
+    CMD+=(--all-generated-frames)
+fi
 
 if [[ "$DEBUG_MODE" == "1" || "$DEBUG_MODE" == "true" || "$DEBUG_MODE" == "TRUE" ]]; then
     CMD+=(--debug-mode)

@@ -160,6 +160,85 @@ def target_coverage_greedy(
     )
 
 
+def block_target_coverage_greedy(
+    selected_views: SelectedViewSet,
+    captured_cameras: Sequence[Camera],
+    target_cameras: Sequence[Camera],
+    num_refs: int,
+    scene_scale: float,
+    config: ReferenceSelectionConfig,
+    visibility_model: VisibilityModel,
+) -> ReferenceSelectionResult:
+    """Select block-local refs by geometry target recall, with pose fallback."""
+
+    indices, refs = _pool(selected_views, captured_cameras)
+    num_refs = max(0, min(int(num_refs), len(refs)))
+    fallback_reason = None
+    if isinstance(visibility_model, NullVisibilityModel) or not len(visibility_model.sample_points):
+        fallback_reason = "visibility_model_unavailable"
+    else:
+        try:
+            target_rows = visibility_model.visibility_matrix(
+                target_cameras, key_prefix="block_ref_target")
+            ref_rows = visibility_model.visibility_matrix(
+                refs, key_prefix="block_ref_capture")
+            weights = np.asarray(visibility_model.sample_weights, dtype=np.float64)
+            target_weight = target_rows.astype(np.float64) @ weights
+            support = np.zeros((len(refs), len(target_cameras)), dtype=np.float64)
+            for i, ref_row in enumerate(ref_rows):
+                intersection = (target_rows & ref_row[None, :]).astype(np.float64) @ weights
+                support[i] = np.divide(
+                    intersection, target_weight,
+                    out=np.zeros_like(intersection), where=target_weight > EPS,
+                )
+            # A soft pose factor prevents backward/far references from winning
+            # solely through a small shared surface subset.
+            support *= np.sqrt(_target_support_matrix(refs, target_cameras, scene_scale, config))
+        except Exception as exc:
+            fallback_reason = f"{type(exc).__name__}: {exc}"
+
+    if fallback_reason is not None:
+        result = target_coverage_greedy(
+            selected_views, captured_cameras, target_cameras,
+            num_refs, scene_scale, config,
+        )
+        result.strategy = "block_target_coverage_pose_fallback"
+        result.scores["fallback_reason"] = fallback_reason
+        return result
+
+    best_support = np.zeros(len(target_cameras), dtype=np.float64)
+    remaining = set(range(len(refs)))
+    chosen_local: List[int] = []
+    trace = []
+    for _ in range(num_refs):
+        best = None
+        best_gain = 0.0
+        for i in sorted(remaining, key=lambda local: int(indices[local])):
+            new_support = np.maximum(best_support, support[i])
+            gain = float(np.sum(new_support - best_support))
+            if gain > best_gain + 1e-12:
+                best, best_gain = i, gain
+        if best is None:
+            break
+        chosen_local.append(best)
+        remaining.remove(best)
+        best_support = np.maximum(best_support, support[best])
+        trace.append({"original_index": int(indices[best]), "gain": best_gain})
+    chosen = sorted(int(indices[i]) for i in chosen_local)
+    return ReferenceSelectionResult(
+        strategy="block_target_coverage",
+        original_indices=chosen,
+        candidate_pool_indices=indices,
+        scores={
+            "support_strategy": "geometry_target_recall",
+            "mean_target_support": float(np.mean(best_support)) if len(best_support) else 0.0,
+            "min_target_support": float(np.min(best_support)) if len(best_support) else 0.0,
+            "p10_target_support": float(np.percentile(best_support, 10)) if len(best_support) else 0.0,
+            "trace": trace,
+        },
+    )
+
+
 def artifixer_style_covisibility(
     selected_views: SelectedViewSet,
     captured_cameras: Sequence[Camera],
@@ -248,6 +327,16 @@ def select_references(
             num_refs,
             visibility_model,
             config,
+        )
+    if config.strategy == "block_target_coverage":
+        return block_target_coverage_greedy(
+            selected_views,
+            captured_cameras,
+            target_cameras,
+            num_refs,
+            scene_scale,
+            config,
+            visibility_model,
         )
     raise ValueError(f"Unknown reference selection strategy: {config.strategy}")
 
